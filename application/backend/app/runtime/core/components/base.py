@@ -127,6 +127,13 @@ class StreamWriter(AbstractContextManager, ABC):
     def write(self, data: Any) -> None:
         pass
 
+    def connect(self) -> None:
+        """Establish connection to the sink if required.
+
+        Implementations that do not require explicit connection setup may
+        leave this method as a no-op.
+        """
+
     def close(self) -> None:
         pass
 
