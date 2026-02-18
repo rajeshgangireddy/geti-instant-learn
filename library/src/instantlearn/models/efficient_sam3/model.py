@@ -133,7 +133,7 @@ class EfficientSam3Model(Sam3Model):
             last_hidden_state=all_tokens,
         )
 
-    def _get_scoring_features(
+    def _get_scoring_features(  # noqa: PLR6301
         self,
         text_features: torch.Tensor,
         text_mask: torch.Tensor | None,
@@ -228,17 +228,17 @@ class EfficientSam3Model(Sam3Model):
         # Load weights
         missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
 
-        # Enable or disable the presence_token mechanism for EfficientSAM3.
+        # Disable the presence_token mechanism for EfficientSAM3.
         #
         # The presence_token_head doesn't work well for EfficientSAM3 due to
-        # model being a distilled student. It is often too low for simple text prompts
-        # and makes the mask probabilties very low. See issue  https://github.com/SimonZeng7108/efficientsam3/issues/17.
-        # For now, as an experimental feature, we expose this here to be set to True or False
-        # We will finalise this based on usage.
+        # the model being a distilled student. It produces unreliable presence
+        # scores that are often too low for simple text prompts, making the
+        # mask probabilities very low. See:
+        # https://github.com/SimonZeng7108/efficientsam3/issues/17
         model.detr_decoder.use_presence = False
         logger.info(
-            "Presence token enabled for EfficientSAM3 — scores use "
-            "pred_logits × presence_logits (matching original repo behavior).",
+            "Presence token disabled for EfficientSAM3 — scores use "
+            "pred_logits only (presence head unreliable for distilled model).",
         )
 
         # Filter presence keys from missing list (intentionally unused)

@@ -18,9 +18,9 @@ import torch
 
 from instantlearn.models.efficient_sam3.constants import BACKBONE_CONFIG, BackboneType
 from instantlearn.models.efficient_sam3.model import (
-    _BACKBONE_PREFIX,
+    _BACKBONE_PREFIX,  # noqa: PLC2701
     EfficientSam3Model,
-    _build_repvit_block_mapping,
+    _build_repvit_block_mapping,  # noqa: PLC2701
     convert_efficientsam3_state_dict,
 )
 
@@ -315,12 +315,12 @@ class TestConvertEfficientsam3StateDict:
             variant=variant,
         )
         # Replace dummy tensors with actual model tensors where shapes match
-        for converted_key, dummy_val in converted_backbone.items():
+        for converted_key in converted_backbone:
             if converted_key in model_sd:
                 backbone_ckpt_with_shapes[converted_key] = model_sd[converted_key]
 
         # Load only backbone keys to verify they all match
-        missing_keys, unexpected_keys = model.load_state_dict(
+        missing_keys, _ = model.load_state_dict(
             backbone_ckpt_with_shapes,
             strict=False,
         )
@@ -454,9 +454,10 @@ class TestConvertEfficientsam3StateDict:
             if backbone_type == BackboneType.REPVIT:
                 if suffix.startswith("features."):
                     original_patterns.append(key)
-            elif backbone_type == BackboneType.EFFICIENTVIT:
-                if suffix.startswith("input_stem.") or re.match(r"stages\.\d+\.op_list\.", suffix):
-                    original_patterns.append(key)
+            elif backbone_type == BackboneType.EFFICIENTVIT and (
+                suffix.startswith("input_stem.") or re.match(r"stages\.\d+\.op_list\.", suffix)
+            ):
+                original_patterns.append(key)
 
         assert not original_patterns, (
             f"Unconverted original backbone keys for {backbone_type}/{variant}:\n"

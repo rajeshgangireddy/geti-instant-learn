@@ -258,7 +258,7 @@ class MobileCLIPTextEncoder(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,  # noqa: ARG002
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Encode text tokens.
 
