@@ -109,11 +109,7 @@ class EfficientSAM3(Model):
         # multi-object detections. It outperformed NMS, non-overlap, and
         # all tested combinations on both precision and F1.
         if post_processing is None:
-            post_processing = PostProcessingConfig(
-                mask_iom_threshold=0.3,
-                nms_iou_threshold=None,
-                remove_overlapping_pixels=False,
-            )
+            post_processing = PostProcessingConfig(mask_iom_threshold=0.3)
 
         self.backbone_type = backbone_type
         self.variant = variant
