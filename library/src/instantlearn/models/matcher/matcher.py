@@ -3,6 +3,7 @@
 
 """Matcher model, based on the paper 'Segment Anything with One Shot Using All-Purpose Feature Matching'."""
 
+import logging
 from pathlib import Path
 
 import torch
@@ -25,12 +26,11 @@ from instantlearn.utils.constants import Backend, SAMModelName
 
 from .prompt_generators import BidirectionalPromptGenerator
 
+logger = logging.getLogger(__name__)
+
 
 class EncoderForwardFeaturesWrapper(nn.Module):
     """Wrapper for image encoder to expose forward_features method for export."""
-
-    IMAGENET_DEFAULT_MEAN = torch.tensor((0.485, 0.456, 0.406))
-    IMAGENET_DEFAULT_STD = torch.tensor((0.229, 0.224, 0.225))
 
     def __init__(
         self,
@@ -42,12 +42,14 @@ class EncoderForwardFeaturesWrapper(nn.Module):
         self.encoder = encoder
         self.ignore_token_length = ignore_token_length
         self.input_size = input_size
+        self.register_buffer("mean", torch.tensor((0.485, 0.456, 0.406)))
+        self.register_buffer("std", torch.tensor((0.229, 0.224, 0.225)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass to get encoder features."""
         x = x.float() / 255.0
         x = functional.interpolate(x, size=(self.input_size, self.input_size), mode="bilinear")
-        x = (x - self.IMAGENET_DEFAULT_MEAN[None, :, None, None]) / self.IMAGENET_DEFAULT_STD[None, :, None, None]
+        x = (x - self.mean[None, :, None, None]) / self.std[None, :, None, None]
         features = self.encoder.forward_features(x)
         features = features[:, self.ignore_token_length :, :]  # ignore CLS and other tokens
         return functional.normalize(features, p=2, dim=-1)
@@ -79,6 +81,11 @@ class MatcherInferenceGraph(nn.Module):
                 export_pp = subset if len(subset) > 0 else None
             elif postprocessor.exportable:
                 export_pp = postprocessor
+            else:
+                logger.warning(
+                    "Post-processor %s is not exportable and will be excluded from the ONNX graph.",
+                    type(postprocessor).__name__,
+                )
         self.add_module("export_postprocessor", export_pp)
 
         # Freeze reference features as model constants
