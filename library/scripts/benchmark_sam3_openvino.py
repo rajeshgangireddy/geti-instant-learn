@@ -1,0 +1,1003 @@
+# Copyright (C) 2025-2026 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+"""Benchmark SAM3 OpenVINO inference across model variants, prompt types, and optimizations.
+
+Measures component-level and end-to-end latency for live-inference scenarios:
+
+**Model variants benchmarked:**
+  - OpenVINO IR: FP16, NNCF-INT8, NNCF-INT4
+  - ONNX: FP16, Q8
+
+**Prompt types:**
+  - Text prompt (category name → detect all instances)
+  - Box prompt (bounding box → segment specific ROI)
+  - Point-as-box prompt (point expanded to small box)
+
+**Scenarios:**
+  - Cold start: Full pipeline including vision encoder
+  - Warm (cached vision features): Same image, new prompts — decoder only
+  - Live stream: Same prompt, different images — measures per-frame throughput
+
+**Optimizations tested:**
+  - Default OpenVINO settings
+  - LATENCY performance hint
+  - Reduced inference threads
+  - BF16 precision hint (if supported)
+
+**Component breakdown:**
+  - Image preprocessing (CPU/PyTorch)
+  - Vision encoder (OpenVINO)
+  - Text encoder (OpenVINO)
+  - Decoder (OpenVINO)
+  - Postprocessing (CPU/PyTorch)
+
+Usage:
+    python scripts/benchmark_sam3_openvino.py --base-dir ./sam3-openvino
+
+    # Specific variant only
+    python scripts/benchmark_sam3_openvino.py --base-dir ./sam3-openvino --variants openvino-fp16
+
+    # More warmup / iterations
+    python scripts/benchmark_sam3_openvino.py --base-dir ./sam3-openvino --warmup 5 --iterations 20
+"""
+
+from __future__ import annotations
+
+import argparse
+import gc
+import logging
+import statistics
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import numpy as np
+import openvino as ov
+import torch
+from rich.console import Console
+from rich.table import Table
+from transformers import CLIPTokenizerFast
+
+# ---------------------------------------------------------------------------
+# Local imports — preprocessing / postprocessing from the library
+# ---------------------------------------------------------------------------
+from instantlearn.models.sam3.processing import (
+    Sam3Postprocessor,
+    Sam3Preprocessor,
+    Sam3PromptPreprocessor,
+)
+
+logger = logging.getLogger(__name__)
+console = Console()
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+RESOLUTION = 1008
+
+# Canonical v2 model file names
+VISION_ENCODER = "vision-encoder"
+TEXT_ENCODER = "text-encoder"
+DECODER = "geo-encoder-mask-decoder"
+
+# Model variants to benchmark (directory name -> human label)
+DEFAULT_VARIANTS: dict[str, str] = {
+    "openvino-fp16": "OV-FP16",
+    "openvino-nncf-int8": "OV-NNCF-INT8",
+    "openvino-nncf-int4": "OV-NNCF-INT4",
+    "onnx-v2-fp16": "ONNX-FP16",
+    "onnx-q8": "ONNX-Q8",
+}
+
+# ONNX variants that cause uncatchable SIGABRT on GPU (OpenCL OOM)
+_ONNX_VARIANTS = {"onnx-v2-fp16", "onnx-q8"}
+
+# OpenVINO compile configs to benchmark (keyed by device category)
+OV_CONFIGS_CPU: dict[str, dict] = {
+    "default": {},
+    "latency-hint": {"PERFORMANCE_HINT": "LATENCY"},
+    "throughput-hint": {"PERFORMANCE_HINT": "THROUGHPUT"},
+}
+
+# GPU configs — skip throughput-hint (multiplies VRAM usage, causes OOM)
+OV_CONFIGS_GPU: dict[str, dict] = {
+    "default": {},
+    "latency-hint": {"PERFORMANCE_HINT": "LATENCY"},
+}
+
+
+def _get_ov_configs(device: str) -> dict[str, dict]:
+    """Return device-appropriate compile configs."""
+    if device.upper().startswith("GPU"):
+        return OV_CONFIGS_GPU
+    return OV_CONFIGS_CPU
+
+
+# ---------------------------------------------------------------------------
+# Data classes for results
+# ---------------------------------------------------------------------------
+@dataclass
+class TimingResult:
+    """Timing for a single inference run broken down by component."""
+
+    preprocess_ms: float = 0.0
+    vision_encoder_ms: float = 0.0
+    text_encoder_ms: float = 0.0
+    decoder_ms: float = 0.0
+    postprocess_ms: float = 0.0
+
+    @property
+    def total_ms(self) -> float:
+        """Total end-to-end time in ms."""
+        return (
+            self.preprocess_ms + self.vision_encoder_ms + self.text_encoder_ms + self.decoder_ms + self.postprocess_ms
+        )
+
+    @property
+    def without_vision_ms(self) -> float:
+        """Time without vision encoder (cached features scenario)."""
+        return self.text_encoder_ms + self.decoder_ms + self.postprocess_ms
+
+
+@dataclass
+class BenchmarkResult:
+    """Aggregated benchmark results for one configuration."""
+
+    variant: str
+    config_name: str
+    prompt_type: str
+    timings: list[TimingResult] = field(default_factory=list)
+
+    def _values(self, attr: str) -> list[float]:
+        return [getattr(t, attr) for t in self.timings]
+
+    def stats(self, attr: str) -> dict[str, float]:
+        """Return mean, median, std, min, max for a timing attribute."""
+        vals = self._values(attr)
+        if not vals:
+            return {"mean": 0, "median": 0, "std": 0, "min": 0, "max": 0}
+        return {
+            "mean": statistics.mean(vals),
+            "median": statistics.median(vals),
+            "std": statistics.stdev(vals) if len(vals) > 1 else 0,
+            "min": min(vals),
+            "max": max(vals),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Model loader with configurable compile properties
+# ---------------------------------------------------------------------------
+class BenchmarkModel:
+    """Lightweight model wrapper for benchmarking individual components."""
+
+    def __init__(
+        self,
+        model_dir: Path,
+        device: str = "CPU",
+        config: dict | None = None,
+    ) -> None:
+        """Initialize benchmark model with compile configuration.
+
+        Args:
+            model_dir: Directory containing model files.
+            device: OpenVINO device string.
+            config: Optional OpenVINO compile properties.
+        """
+        core = ov.Core()
+        compile_config = config or {}
+
+        vision_path = self._find(model_dir, VISION_ENCODER)
+        text_path = self._find(model_dir, TEXT_ENCODER)
+        decoder_path = self._find(model_dir, DECODER)
+
+        self.vision_model = core.compile_model(vision_path, device, compile_config)
+        self.text_model = core.compile_model(text_path, device, compile_config)
+        self.decoder_model = core.compile_model(decoder_path, device, compile_config)
+
+        # Create infer requests for sync inference (avoids request creation overhead)
+        self.vision_request = self.vision_model.create_infer_request()
+        self.text_request = self.text_model.create_infer_request()
+        self.decoder_request = self.decoder_model.create_infer_request()
+
+        # Preprocessors
+        self.preprocessor = Sam3Preprocessor(target_size=RESOLUTION)
+        self.prompt_preprocessor = Sam3PromptPreprocessor(target_size=RESOLUTION)
+        self.postprocessor = Sam3Postprocessor(
+            target_size=RESOLUTION,
+            threshold=0.5,
+            mask_threshold=0.5,
+        )
+
+        # Tokenizer — load from model_dir if available, else HuggingFace
+        if (model_dir / "tokenizer.json").exists():
+            self.tokenizer = CLIPTokenizerFast.from_pretrained(str(model_dir))
+        else:
+            self.tokenizer = CLIPTokenizerFast.from_pretrained("jetjodh/sam3")
+
+    @staticmethod
+    def _find(model_dir: Path, name: str) -> Path:
+        """Find model file (.xml preferred, then .onnx).
+
+        Raises:
+            FileNotFoundError: If no matching model file is found.
+        """
+        for ext in (".xml", ".onnx", "-fp16.onnx"):
+            candidate = model_dir / f"{name}{ext}"
+            if candidate.exists():
+                return candidate
+        # glob fallback
+        variants = sorted(model_dir.glob(f"{name}*.onnx"))
+        if variants:
+            return variants[0]
+        msg = f"Model '{name}' not found in {model_dir}"
+        raise FileNotFoundError(msg)
+
+    # ---- Sub-model runners returning elapsed ms ----
+
+    def run_preprocess(
+        self,
+        image: torch.Tensor,
+    ) -> tuple[np.ndarray, list[tuple[int, int]], float]:
+        """Preprocess image; returns (pixel_values_np, original_sizes, elapsed_ms)."""
+        t0 = time.perf_counter()
+        image_4d = image.unsqueeze(0) if image.ndim == 3 else image
+        with torch.no_grad():
+            pixel_values, original_sizes = self.preprocessor(image_4d)
+        pixel_np = pixel_values.numpy()
+        elapsed = (time.perf_counter() - t0) * 1000
+        return pixel_np, original_sizes, elapsed
+
+    def run_vision_encoder(self, pixel_values: np.ndarray) -> tuple[dict[str, np.ndarray], float]:
+        """Run vision encoder; returns (features_dict, elapsed_ms)."""
+        t0 = time.perf_counter()
+        self.vision_request.infer([pixel_values])
+        result = {
+            "fpn_feat_0": self.vision_request.get_tensor("fpn_feat_0").data,
+            "fpn_feat_1": self.vision_request.get_tensor("fpn_feat_1").data,
+            "fpn_feat_2": self.vision_request.get_tensor("fpn_feat_2").data,
+            "fpn_pos_2": self.vision_request.get_tensor("fpn_pos_2").data,
+        }
+        elapsed = (time.perf_counter() - t0) * 1000
+        return result, elapsed
+
+    def run_text_encoder(
+        self,
+        text: str,
+    ) -> tuple[np.ndarray, np.ndarray, float]:
+        """Run text encoder; returns (text_features, text_mask, elapsed_ms)."""
+        tokens = self.tokenizer([text], return_tensors="np", padding=True)
+        input_ids = _pad_or_truncate(tokens.input_ids.astype(np.int64), 32)
+        attention_mask = _pad_or_truncate(tokens.attention_mask.astype(np.int64), 32)
+
+        t0 = time.perf_counter()
+        self.text_request.infer([input_ids, attention_mask])
+        text_features = self.text_request.get_tensor("text_features").data
+        text_mask = self.text_request.get_tensor("text_mask").data
+        elapsed = (time.perf_counter() - t0) * 1000
+        return text_features, text_mask, elapsed
+
+    def run_decoder(
+        self,
+        vision_features: dict[str, np.ndarray],
+        text_features: np.ndarray,
+        text_mask: np.ndarray,
+        input_boxes: np.ndarray,
+        input_boxes_labels: np.ndarray,
+    ) -> tuple[dict[str, np.ndarray], float]:
+        """Run decoder; returns (outputs_dict, elapsed_ms)."""
+        t0 = time.perf_counter()
+        self.decoder_request.infer([
+            vision_features["fpn_feat_0"],
+            vision_features["fpn_feat_1"],
+            vision_features["fpn_feat_2"],
+            vision_features["fpn_pos_2"],
+            text_features,
+            text_mask,
+            input_boxes,
+            input_boxes_labels,
+        ])
+        result = {
+            "pred_masks": self.decoder_request.get_tensor("pred_masks").data,
+            "pred_boxes": self.decoder_request.get_tensor("pred_boxes").data,
+            "pred_logits": self.decoder_request.get_tensor("pred_logits").data,
+            "presence_logits": self.decoder_request.get_tensor("presence_logits").data,
+        }
+        elapsed = (time.perf_counter() - t0) * 1000
+        return result, elapsed
+
+    def run_postprocess(
+        self,
+        decoder_outputs: dict[str, np.ndarray],
+        img_size: tuple[int, int],
+    ) -> tuple[dict, float]:
+        """Run postprocessing; returns (results_dict, elapsed_ms)."""
+        t0 = time.perf_counter()
+        outputs_torch = {k: torch.from_numpy(np.array(v)) for k, v in decoder_outputs.items()}
+        with torch.no_grad():
+            result = self.postprocessor(outputs_torch, target_sizes=[img_size])
+        elapsed = (time.perf_counter() - t0) * 1000
+        return result[0], elapsed
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _pad_or_truncate(arr: np.ndarray, target_len: int) -> np.ndarray:
+    """Pad or truncate array to target sequence length."""
+    cur = arr.shape[1]
+    if cur == target_len:
+        return arr
+    if cur > target_len:
+        return arr[:, :target_len]
+    pad = np.zeros((arr.shape[0], target_len - cur), dtype=arr.dtype)
+    return np.concatenate([arr, pad], axis=1)
+
+
+def _make_dummy_image(h: int = 720, w: int = 1280) -> torch.Tensor:
+    """Create a realistic-sized dummy image tensor [3, H, W]."""
+    rng = np.random.default_rng(42)
+    img = rng.integers(0, 255, (h, w, 3), dtype=np.uint8)
+    return torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
+
+
+def _make_real_image(image_path: Path) -> torch.Tensor | None:
+    """Load a real image, or return None if not found."""
+    if not image_path.exists():
+        return None
+    import cv2  # noqa: PLC0415
+
+    img = cv2.imread(str(image_path))
+    if img is None:
+        return None
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    return torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
+
+
+def _sentinel_box() -> tuple[np.ndarray, np.ndarray]:
+    """Return sentinel box inputs (no box prompt)."""
+    boxes = np.zeros((1, 1, 4), dtype=np.float32)
+    labels = np.full((1, 1), -10, dtype=np.int64)
+    return boxes, labels
+
+
+def _real_box(
+    preprocessor: Sam3PromptPreprocessor,
+    bbox: np.ndarray,
+    original_sizes: list[tuple[int, int]],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Convert a xyxy bbox to the model's normalized cxcywh format."""
+    with torch.no_grad():
+        box_tensor = preprocessor(bbox, original_sizes)
+    boxes = box_tensor.numpy().astype(np.float32)
+    labels = np.ones((1, boxes.shape[1]), dtype=np.int64)
+    return boxes, labels
+
+
+# ---------------------------------------------------------------------------
+# Benchmark runners
+# ---------------------------------------------------------------------------
+
+
+def benchmark_single_inference(
+    model: BenchmarkModel,
+    image: torch.Tensor,
+    text: str,
+    bbox: np.ndarray | None = None,
+) -> TimingResult:
+    """Run one complete inference pass and time each component."""
+    img_size = image.shape[-2:]
+
+    # 1. Preprocess
+    pixel_np, original_sizes, t_pre = model.run_preprocess(image)
+
+    # 2. Vision encoder
+    vision_features, t_vis = model.run_vision_encoder(pixel_np)
+
+    # 3. Text encoder
+    text_features, text_mask, t_txt = model.run_text_encoder(text)
+
+    # 4. Prepare boxes
+    if bbox is not None:
+        input_boxes, input_boxes_labels = _real_box(
+            model.prompt_preprocessor,
+            bbox,
+            original_sizes,
+        )
+    else:
+        input_boxes, input_boxes_labels = _sentinel_box()
+
+    # 5. Decoder
+    decoder_outputs, t_dec = model.run_decoder(
+        vision_features,
+        text_features,
+        text_mask,
+        input_boxes,
+        input_boxes_labels,
+    )
+
+    # 6. Postprocess
+    _, t_post = model.run_postprocess(decoder_outputs, img_size)
+
+    return TimingResult(
+        preprocess_ms=t_pre,
+        vision_encoder_ms=t_vis,
+        text_encoder_ms=t_txt,
+        decoder_ms=t_dec,
+        postprocess_ms=t_post,
+    )
+
+
+def benchmark_cached_vision(
+    model: BenchmarkModel,
+    image: torch.Tensor,
+    text: str,
+    bbox: np.ndarray | None = None,
+    iterations: int = 20,
+) -> list[TimingResult]:
+    """Benchmark decoder-only inference with cached vision & text features.
+
+    This simulates the scenario where vision encoder output is cached (same
+    image) and text encoder output is cached (same prompt). Only decoder
+    + postprocess run per iteration.
+    """
+    img_size = image.shape[-2:]
+
+    # Pre-compute everything that can be cached
+    pixel_np, original_sizes, _ = model.run_preprocess(image)
+    vision_features, _ = model.run_vision_encoder(pixel_np)
+    text_features, text_mask, _ = model.run_text_encoder(text)
+
+    if bbox is not None:
+        input_boxes, input_boxes_labels = _real_box(
+            model.prompt_preprocessor,
+            bbox,
+            original_sizes,
+        )
+    else:
+        input_boxes, input_boxes_labels = _sentinel_box()
+
+    results: list[TimingResult] = []
+    for _ in range(iterations):
+        decoder_outputs, t_dec = model.run_decoder(
+            vision_features,
+            text_features,
+            text_mask,
+            input_boxes,
+            input_boxes_labels,
+        )
+        _, t_post = model.run_postprocess(decoder_outputs, img_size)
+        results.append(TimingResult(decoder_ms=t_dec, postprocess_ms=t_post))
+    return results
+
+
+def benchmark_live_stream(
+    model: BenchmarkModel,
+    images: list[torch.Tensor],
+    text: str,
+    iterations: int = 10,
+) -> list[TimingResult]:
+    """Benchmark live-stream scenario: same prompt, different images.
+
+    Text encoder output is cached; vision encoder runs per frame.
+    """
+    # Cache text features once
+    text_features, text_mask, _ = model.run_text_encoder(text)
+    input_boxes, input_boxes_labels = _sentinel_box()
+
+    results: list[TimingResult] = []
+    img_cycle = images * ((iterations // len(images)) + 1)
+
+    for i in range(iterations):
+        image = img_cycle[i % len(img_cycle)]
+        img_size = image.shape[-2:]
+
+        pixel_np, _orig, t_pre = model.run_preprocess(image)
+        vision_features, t_vis = model.run_vision_encoder(pixel_np)
+
+        decoder_outputs, t_dec = model.run_decoder(
+            vision_features,
+            text_features,
+            text_mask,
+            input_boxes,
+            input_boxes_labels,
+        )
+        _, t_post = model.run_postprocess(decoder_outputs, img_size)
+
+        results.append(
+            TimingResult(
+                preprocess_ms=t_pre,
+                vision_encoder_ms=t_vis,
+                decoder_ms=t_dec,
+                postprocess_ms=t_post,
+            ),
+        )
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Main benchmark orchestrator
+# ---------------------------------------------------------------------------
+
+
+def _benchmark_variant_config(
+    model: BenchmarkModel,
+    label: str,
+    config_name: str,
+    prompt_configs: list[tuple[str, str, np.ndarray | None]],
+    primary_image: torch.Tensor,
+    real_images: list[torch.Tensor],
+    warmup: int,
+    iterations: int,
+    live_frames: int,
+) -> list[BenchmarkResult]:
+    """Run all benchmarks for one variant + config combination."""
+    results: list[BenchmarkResult] = []
+
+    # --- Per-prompt-type benchmarks ---
+    for prompt_label, text, bbox in prompt_configs:
+        console.print(f"  [green]{prompt_label}[/green] prompt — warmup({warmup}) + measure({iterations})")
+
+        # Warmup
+        for _ in range(warmup):
+            benchmark_single_inference(model, primary_image, text, bbox)
+
+        # Full pipeline (cold per-image)
+        result = BenchmarkResult(
+            variant=label,
+            config_name=config_name,
+            prompt_type=prompt_label,
+        )
+        for _ in range(iterations):
+            timing = benchmark_single_inference(model, primary_image, text, bbox)
+            result.timings.append(timing)
+        results.append(result)
+
+        # Cached vision features (decoder-only)
+        cached_result = BenchmarkResult(
+            variant=label,
+            config_name=config_name,
+            prompt_type=f"{prompt_label}(cached-vis)",
+        )
+        cached_timings = benchmark_cached_vision(
+            model,
+            primary_image,
+            text,
+            bbox,
+            iterations=iterations,
+        )
+        cached_result.timings = cached_timings
+        results.append(cached_result)
+
+    # --- Live stream benchmark (text prompt, multiple images) ---
+    console.print(f"  [green]live-stream[/green] — warmup({warmup}) + measure({live_frames})")
+
+    # Warmup
+    for _ in range(warmup):
+        benchmark_single_inference(model, real_images[0], "elephant", None)
+
+    live_result = BenchmarkResult(
+        variant=label,
+        config_name=config_name,
+        prompt_type="live-stream",
+    )
+    live_timings = benchmark_live_stream(
+        model,
+        real_images,
+        "elephant",
+        iterations=live_frames,
+    )
+    live_result.timings = live_timings
+    results.append(live_result)
+
+    return results
+
+
+def run_benchmarks(
+    base_dir: Path,
+    variants: list[str],
+    device: str = "CPU",
+    warmup: int = 3,
+    iterations: int = 10,
+    live_frames: int = 15,
+) -> list[BenchmarkResult]:
+    """Run all benchmarks across variants, prompt types, and configs."""
+    # Prepare images
+    coco_dir = Path("examples/assets/coco")
+    real_images: list[torch.Tensor] = []
+    for img_file in sorted(coco_dir.glob("*.jpg"))[:4]:
+        img = _make_real_image(img_file)
+        if img is not None:
+            real_images.append(img)
+
+    if not real_images:
+        console.print("[yellow]No real images found, using dummy images[/yellow]")
+        real_images = [_make_dummy_image() for _ in range(3)]
+
+    primary_image = real_images[0]
+
+    # A box prompt (bounding box in xyxy for an elephant in 000000286874.jpg)
+    sample_bbox = np.array([[216, 184, 458, 436]])
+
+    # Point-as-box (expand a point to a small 20x20 box)
+    point_center = np.array([337, 310])  # center of elephant
+    half = 10
+    point_bbox = np.array([
+        [
+            point_center[0] - half,
+            point_center[1] - half,
+            point_center[0] + half,
+            point_center[1] + half,
+        ],
+    ])
+
+    # Prompt configurations: (label, text, bbox_or_none)
+    prompt_configs: list[tuple[str, str, np.ndarray | None]] = [
+        ("text", "elephant", None),
+        ("box", "visual", sample_bbox),
+        ("point-as-box", "visual", point_bbox),
+    ]
+
+    all_results: list[BenchmarkResult] = []
+
+    for variant_dir_name in variants:
+        # Skip ONNX variants on GPU — they cause uncatchable SIGABRT from OpenCL OOM
+        if device.upper().startswith("GPU") and variant_dir_name in _ONNX_VARIANTS:
+            console.print(
+                f"[yellow]Skipping {variant_dir_name} on GPU (ONNX on-the-fly compilation exceeds GPU memory)[/yellow]",
+            )
+            continue
+
+        variant_path = base_dir / variant_dir_name
+        if not variant_path.is_dir():
+            console.print(f"[yellow]Skipping {variant_dir_name}: not found[/yellow]")
+            continue
+
+        label = DEFAULT_VARIANTS.get(variant_dir_name, variant_dir_name)
+
+        ov_configs = _get_ov_configs(device)
+        for config_name, config in ov_configs.items():
+            console.rule(f"[bold cyan]{label} — {config_name}[/bold cyan]")
+
+            try:
+                model = BenchmarkModel(variant_path, device, config)
+            except Exception:
+                logger.exception("Failed to load %s with config %s", variant_dir_name, config_name)
+                continue
+
+            try:
+                variant_results = _benchmark_variant_config(
+                    model=model,
+                    label=label,
+                    config_name=config_name,
+                    prompt_configs=prompt_configs,
+                    primary_image=primary_image,
+                    real_images=real_images,
+                    warmup=warmup,
+                    iterations=iterations,
+                    live_frames=live_frames,
+                )
+                all_results.extend(variant_results)
+            except RuntimeError as exc:
+                console.print(f"[red]Runtime error for {label}/{config_name}: {exc}[/red]")
+                console.print("[yellow]Skipping — likely GPU out-of-memory[/yellow]")
+                continue
+
+            # Cleanup
+            del model
+            gc.collect()
+
+    return all_results
+
+
+# ---------------------------------------------------------------------------
+# Result display
+# ---------------------------------------------------------------------------
+
+
+def print_summary_table(results: list[BenchmarkResult]) -> None:
+    """Print a rich summary table of all benchmark results."""
+    table = Table(
+        title="SAM3 OpenVINO Benchmark Results (ms)",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Variant", style="cyan", width=16)
+    table.add_column("Config", width=16)
+    table.add_column("Prompt", width=18)
+    table.add_column("Preproc", justify="right")
+    table.add_column("Vision Enc", justify="right")
+    table.add_column("Text Enc", justify="right")
+    table.add_column("Decoder", justify="right")
+    table.add_column("Postproc", justify="right")
+    table.add_column("Total", justify="right", style="bold")
+    table.add_column("w/o Vision", justify="right", style="green")
+    table.add_column("FPS", justify="right", style="magenta")
+
+    for r in results:
+        s_pre = r.stats("preprocess_ms")
+        s_vis = r.stats("vision_encoder_ms")
+        s_txt = r.stats("text_encoder_ms")
+        s_dec = r.stats("decoder_ms")
+        s_post = r.stats("postprocess_ms")
+        s_total = r.stats("total_ms")
+        s_novis = r.stats("without_vision_ms")
+
+        total_mean = s_total["mean"]
+        fps = 1000.0 / total_mean if total_mean > 0 else 0
+
+        table.add_row(
+            r.variant,
+            r.config_name,
+            r.prompt_type,
+            f"{s_pre['mean']:.1f}",
+            f"{s_vis['mean']:.1f}",
+            f"{s_txt['mean']:.1f}",
+            f"{s_dec['mean']:.1f}",
+            f"{s_post['mean']:.1f}",
+            f"{s_total['mean']:.1f}",
+            f"{s_novis['mean']:.1f}",
+            f"{fps:.2f}",
+        )
+
+    console.print(table)
+
+
+def print_component_detail(results: list[BenchmarkResult]) -> None:
+    """Print detailed component statistics for each benchmark."""
+    for r in results:
+        console.print(
+            f"\n[bold]{r.variant} | {r.config_name} | {r.prompt_type}[/bold]",
+        )
+        detail_table = Table(show_header=True, box=None, pad_edge=False)
+        detail_table.add_column("Component", width=18)
+        detail_table.add_column("Mean", justify="right")
+        detail_table.add_column("Median", justify="right")
+        detail_table.add_column("Std", justify="right")
+        detail_table.add_column("Min", justify="right")
+        detail_table.add_column("Max", justify="right")
+
+        for attr_name, label in [
+            ("preprocess_ms", "Preprocess"),
+            ("vision_encoder_ms", "Vision Encoder"),
+            ("text_encoder_ms", "Text Encoder"),
+            ("decoder_ms", "Decoder"),
+            ("postprocess_ms", "Postprocess"),
+            ("total_ms", "TOTAL"),
+            ("without_vision_ms", "w/o Vision"),
+        ]:
+            s = r.stats(attr_name)
+            style = "bold" if attr_name == "total_ms" else ""
+            detail_table.add_row(
+                label,
+                f"{s['mean']:.1f}",
+                f"{s['median']:.1f}",
+                f"{s['std']:.1f}",
+                f"{s['min']:.1f}",
+                f"{s['max']:.1f}",
+                style=style,
+            )
+        console.print(detail_table)
+
+
+def print_comparison_matrix(results: list[BenchmarkResult]) -> None:
+    """Print a compact variant x prompt comparison (default config only)."""
+    # Filter to default config, full pipeline only (not cached / live-stream)
+    default_results = [
+        r
+        for r in results
+        if r.config_name == "default" and "cached" not in r.prompt_type and r.prompt_type != "live-stream"
+    ]
+
+    if not default_results:
+        return
+
+    table = Table(title="Variant x Prompt Comparison (default config, ms)", show_header=True)
+    table.add_column("Variant", style="cyan", width=16)
+
+    prompt_types = sorted({r.prompt_type for r in default_results})
+    for pt in prompt_types:
+        table.add_column(f"{pt} (total)", justify="right")
+        table.add_column(f"{pt} (dec)", justify="right")
+
+    variant_names = sorted({r.variant for r in default_results})
+    for variant in variant_names:
+        row = [variant]
+        for pt in prompt_types:
+            match = [r for r in default_results if r.variant == variant and r.prompt_type == pt]
+            if match:
+                s_total = match[0].stats("total_ms")
+                s_dec = match[0].stats("decoder_ms")
+                row.extend([f"{s_total['mean']:.1f}", f"{s_dec['mean']:.1f}"])
+            else:
+                row.extend(["—", "—"])
+        table.add_row(*row)
+
+    console.print(table)
+
+
+def print_speedup_summary(results: list[BenchmarkResult]) -> None:
+    """Print speedup of quantized variants relative to FP16 (default config)."""
+    default_full = [
+        r
+        for r in results
+        if r.config_name == "default"
+        and "cached" not in r.prompt_type
+        and r.prompt_type != "live-stream"
+        and r.prompt_type == "text"
+    ]
+
+    fp16 = [r for r in default_full if "FP16" in r.variant and "ONNX" not in r.variant]
+    if not fp16:
+        return
+
+    baseline = fp16[0].stats("total_ms")["mean"]
+    baseline_vis = fp16[0].stats("vision_encoder_ms")["mean"]
+
+    table = Table(title="Speedup vs OV-FP16 (text prompt, default config)", show_header=True)
+    table.add_column("Variant", style="cyan", width=16)
+    table.add_column("Total (ms)", justify="right")
+    table.add_column("Speedup", justify="right", style="green")
+    table.add_column("Vision Enc (ms)", justify="right")
+    table.add_column("Vis Speedup", justify="right", style="green")
+
+    for r in default_full:
+        total = r.stats("total_ms")["mean"]
+        vis = r.stats("vision_encoder_ms")["mean"]
+        total_speedup = baseline / total if total > 0 else 0
+        vis_speedup = baseline_vis / vis if vis > 0 else 0
+
+        table.add_row(
+            r.variant,
+            f"{total:.1f}",
+            f"{total_speedup:.2f}x",
+            f"{vis:.1f}",
+            f"{vis_speedup:.2f}x",
+        )
+
+    console.print(table)
+
+
+def print_live_fps_table(results: list[BenchmarkResult]) -> None:
+    """Print live-stream FPS comparison across variants and configs."""
+    live_results = [r for r in results if r.prompt_type == "live-stream"]
+    if not live_results:
+        return
+
+    table = Table(title="Live Stream FPS (text prompt, cached text encoder)", show_header=True)
+    table.add_column("Variant", style="cyan", width=16)
+    table.add_column("Config", width=16)
+    table.add_column("Total (ms)", justify="right")
+    table.add_column("Vision (ms)", justify="right")
+    table.add_column("Decoder (ms)", justify="right")
+    table.add_column("FPS", justify="right", style="bold magenta")
+
+    for r in live_results:
+        s = r.stats("total_ms")
+        s_vis = r.stats("vision_encoder_ms")
+        s_dec = r.stats("decoder_ms")
+        fps = 1000.0 / s["mean"] if s["mean"] > 0 else 0
+
+        table.add_row(
+            r.variant,
+            r.config_name,
+            f"{s['mean']:.1f}",
+            f"{s_vis['mean']:.1f}",
+            f"{s_dec['mean']:.1f}",
+            f"{fps:.1f}",
+        )
+
+    console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Benchmark SAM3 OpenVINO inference latency.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--base-dir",
+        type=Path,
+        default=Path("./sam3-openvino"),
+        help="Directory containing model variant subdirectories.",
+    )
+    parser.add_argument(
+        "--variants",
+        nargs="+",
+        default=list(DEFAULT_VARIANTS.keys()),
+        help="Model variant directory names to benchmark.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="CPU",
+        help="OpenVINO device. Default: CPU",
+    )
+    parser.add_argument(
+        "--warmup",
+        type=int,
+        default=3,
+        help="Number of warmup iterations before measurement.",
+    )
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=10,
+        help="Number of measured iterations per benchmark.",
+    )
+    parser.add_argument(
+        "--live-frames",
+        type=int,
+        default=15,
+        help="Number of frames for live-stream benchmark.",
+    )
+    parser.add_argument(
+        "--detail",
+        action="store_true",
+        help="Print detailed per-component statistics.",
+    )
+    return parser
+
+
+def main() -> None:
+    """CLI entry point."""
+    parser = _build_parser()
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s - %(name)s: %(message)s",
+        stream=sys.stdout,
+        force=True,
+    )
+
+    console.rule("[bold]SAM3 OpenVINO Benchmark[/bold]")
+    console.print(f"Device: {args.device}")
+    console.print(f"Warmup: {args.warmup}, Iterations: {args.iterations}, Live frames: {args.live_frames}")
+    console.print(f"Variants: {args.variants}")
+    ov_configs = _get_ov_configs(args.device)
+    console.print(f"OV configs: {list(ov_configs.keys())}")
+    console.print()
+
+    results = run_benchmarks(
+        base_dir=args.base_dir,
+        variants=args.variants,
+        device=args.device,
+        warmup=args.warmup,
+        iterations=args.iterations,
+        live_frames=args.live_frames,
+    )
+
+    if not results:
+        console.print("[red]No benchmark results collected.[/red]")
+        return
+
+    console.rule("[bold]Summary[/bold]")
+    print_summary_table(results)
+
+    console.rule("[bold]Variant x Prompt Comparison[/bold]")
+    print_comparison_matrix(results)
+
+    console.rule("[bold]Speedup vs FP16[/bold]")
+    print_speedup_summary(results)
+
+    console.rule("[bold]Live Stream FPS[/bold]")
+    print_live_fps_table(results)
+
+    if args.detail:
+        console.rule("[bold]Detailed Statistics[/bold]")
+        print_component_detail(results)
+
+
+if __name__ == "__main__":
+    main()
