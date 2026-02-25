@@ -238,6 +238,7 @@ class GeometryEncoder(nn.Module):
         boxes_mask: torch.Tensor,
         boxes_labels: torch.Tensor,
         vision_features: torch.Tensor,
+        drop_spatial_bias: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Encode box prompts with embeddings and labels.
 
@@ -249,6 +250,9 @@ class GeometryEncoder(nn.Module):
             boxes_labels (torch.Tensor): Box labels [batch_size, num_boxes].
             vision_features (torch.Tensor): Vision features [batch_size, hidden_size,
                 height, width].
+            drop_spatial_bias (bool): If True, skip coordinate projection and
+                position encoding, keeping only ROI-pooled visual features.
+                Useful for cross-image exemplar detection. Default: False.
 
         Returns:
             tuple[torch.Tensor, torch.Tensor]: Encoded boxes and mask.
@@ -274,19 +278,26 @@ class GeometryEncoder(nn.Module):
 
         pooled_projection = self.boxes_pool_project(sampled_features)
         pooled_projection = pooled_projection.view(batch_size, num_boxes, self.hidden_size)
-        boxes_embed += pooled_projection
 
-        # Add position encoding
-        center_x, center_y, box_width, box_height = boxes.unbind(-1)
-        pos_enc = self._encode_box_coordinates(
-            center_x.flatten(),
-            center_y.flatten(),
-            box_width.flatten(),
-            box_height.flatten(),
-        )
-        pos_enc = pos_enc.view(batch_size, num_boxes, pos_enc.shape[-1])
-        pos_projection = self.boxes_pos_enc_project(pos_enc)
-        boxes_embed += pos_projection
+        if drop_spatial_bias:
+            # Cross-image mode: only ROI-pooled visual features (no spatial bias)
+            boxes_embed = pooled_projection
+        else:
+            # Same-image mode (original): coordinates + ROI + position encoding
+            boxes_embed = self.boxes_direct_project(boxes)
+            boxes_embed += pooled_projection
+
+            # Add position encoding
+            center_x, center_y, box_width, box_height = boxes.unbind(-1)
+            pos_enc = self._encode_box_coordinates(
+                center_x.flatten(),
+                center_y.flatten(),
+                box_width.flatten(),
+                box_height.flatten(),
+            )
+            pos_enc = pos_enc.view(batch_size, num_boxes, pos_enc.shape[-1])
+            pos_projection = self.boxes_pos_enc_project(pos_enc)
+            boxes_embed += pos_projection
 
         # Add label embeddings (positive/negative)
         label_embed = self.label_embed(boxes_labels.long())
@@ -298,6 +309,7 @@ class GeometryEncoder(nn.Module):
         points_mask: torch.Tensor,
         points_labels: torch.Tensor,
         vision_features: torch.Tensor,
+        drop_spatial_bias: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Encode point prompts with embeddings and labels.
 
@@ -310,6 +322,9 @@ class GeometryEncoder(nn.Module):
             points_mask: Valid point mask [batch_size, num_points].
             points_labels: Point labels [batch_size, num_points].
             vision_features: Vision features [batch_size, hidden_size, height, width].
+            drop_spatial_bias (bool): If True, skip coordinate projection and
+                position encoding, keeping only grid-sampled visual features.
+                Useful for cross-image exemplar detection. Default: False.
 
         Returns:
             Encoded point embeddings and mask.
@@ -332,16 +347,22 @@ class GeometryEncoder(nn.Module):
         ).to(vision_features.dtype)  # [B, C, N, 1]
         sampled = sampled.squeeze(-1).transpose(1, 2)  # [B, N, C]
         pool_projection = self.points_pool_project(sampled)
-        points_embed += pool_projection
 
-        # Position encoding at point (x, y) locations
-        px = points[..., 0].flatten()
-        py = points[..., 1].flatten()
-        pos_x, pos_y = self.position_encoding.encode_1d_positions(px, py)
-        pos_enc = torch.cat([pos_y, pos_x], dim=1)  # [B*N, hidden_size]
-        pos_enc = pos_enc.view(batch_size, num_points, -1)
-        pos_projection = self.points_pos_enc_project(pos_enc)
-        points_embed += pos_projection
+        if drop_spatial_bias:
+            # Cross-image mode: only grid-sampled visual features (no spatial bias)
+            points_embed = pool_projection
+        else:
+            # Same-image mode (original): coordinates + pool + position encoding
+            points_embed += pool_projection
+
+            # Position encoding at point (x, y) locations
+            px = points[..., 0].flatten()
+            py = points[..., 1].flatten()
+            pos_x, pos_y = self.position_encoding.encode_1d_positions(px, py)
+            pos_enc = torch.cat([pos_y, pos_x], dim=1)  # [B*N, hidden_size]
+            pos_enc = pos_enc.view(batch_size, num_points, -1)
+            pos_projection = self.points_pos_enc_project(pos_enc)
+            points_embed += pos_projection
 
         # Add label embeddings (positive/negative)
         label_embed = self.label_embed(points_labels.long())
@@ -349,28 +370,30 @@ class GeometryEncoder(nn.Module):
 
     def forward(
         self,
-        box_embeddings: torch.Tensor,
-        box_mask: torch.Tensor,
-        box_labels: torch.Tensor,
-        img_feats: tuple[torch.Tensor, ...],
+        box_embeddings: torch.Tensor | None = None,
+        box_mask: torch.Tensor | None = None,
+        box_labels: torch.Tensor | None = None,
+        img_feats: tuple[torch.Tensor, ...] | None = None,
         img_pos_embeds: tuple[torch.Tensor, ...] | None = None,
         point_embeddings: torch.Tensor | None = None,
         point_mask: torch.Tensor | None = None,
         point_labels: torch.Tensor | None = None,
+        drop_spatial_bias: bool = False,
     ) -> dict[str, torch.Tensor]:
-        """Encode geometric prompts with transformer layers.
+        """Encode geometric prompts (boxes and/or points) with transformer layers.
 
         Supports both box and point prompts. Box prompts use ROI align for feature
         pooling, while point prompts use bilinear sampling at point locations.
+        At least one of box_embeddings or point_embeddings must be provided.
 
         Args:
-            box_embeddings (torch.Tensor): Box coordinates in CxCyWH format
-                [batch_size, num_boxes, 4].
-            box_mask (torch.Tensor): Attention mask for boxes [batch_size,
-                num_boxes].
-            box_labels (torch.Tensor): Labels for boxes (positive/negative)
-                [batch_size, num_boxes].
-            img_feats (tuple[torch.Tensor, ...]): Image features from vision
+            box_embeddings (torch.Tensor | None): Box coordinates in CxCyWH format
+                [batch_size, num_boxes, 4]. Default: None.
+            box_mask (torch.Tensor | None): Attention mask for boxes [batch_size,
+                num_boxes]. Default: None.
+            box_labels (torch.Tensor | None): Labels for boxes (positive/negative)
+                [batch_size, num_boxes]. Default: None.
+            img_feats (tuple[torch.Tensor, ...] | None): Image features from vision
                 encoder.
             img_pos_embeds (tuple[torch.Tensor, ...] | None): Optional position
                 embeddings for image features. Default: None.
@@ -380,13 +403,26 @@ class GeometryEncoder(nn.Module):
                 num_points]. Default: None.
             point_labels (torch.Tensor | None): Point labels (1=positive,
                 0=negative) [batch_size, num_points]. Default: None.
+            drop_spatial_bias (bool): If True, skip coordinate projection and
+                position encoding in box/point encoding, keeping only pooled
+                visual features. Default: False.
+
+        Raises:
+            ValueError: If neither box nor point embeddings are provided.
 
         Returns:
             dict[str, torch.Tensor]: Dictionary with 'last_hidden_state' containing
                 encoded geometry features [batch_size, num_prompts, hidden_size]
                 and 'attention_mask' for padding.
         """
-        batch_size = box_embeddings.shape[0]
+        # Determine batch size from available inputs
+        if box_embeddings is not None:
+            batch_size = box_embeddings.shape[0]
+        elif point_embeddings is not None:
+            batch_size = point_embeddings.shape[0]
+        else:
+            msg = "At least one of box_embeddings or point_embeddings must be provided"
+            raise ValueError(msg)
 
         # Prepare vision features for cross-attention: flatten spatial dimensions
         vision_feats = img_feats[-1]  # [B, C, H, W]
@@ -400,17 +436,22 @@ class GeometryEncoder(nn.Module):
         normalized_img_feats = self.vision_layer_norm(img_feats_last)
         normalized_img_feats = normalized_img_feats.permute(0, 3, 1, 2)  # [B, C, H, W]
 
-        prompt_embeds, prompt_mask = self._encode_boxes(box_embeddings, box_mask, box_labels, normalized_img_feats)
+        # Encode boxes and/or points
+        prompt_embeds = None
+        prompt_mask = None
 
-        # Encode point prompts if provided and concatenate with box embeddings
-        if point_embeddings is not None and point_embeddings.numel() > 0:
-            if point_mask is None:
-                point_mask = torch.ones(
-                    batch_size,
-                    point_embeddings.shape[1],
-                    dtype=torch.bool,
-                    device=point_embeddings.device,
-                )
+        if box_embeddings is not None and box_mask is not None:
+            box_embeds, box_attn_mask = self._encode_boxes(
+                box_embeddings,
+                box_mask,
+                box_labels,
+                normalized_img_feats,
+                drop_spatial_bias=drop_spatial_bias,
+            )
+            prompt_embeds = box_embeds
+            prompt_mask = box_attn_mask
+
+        if point_embeddings is not None and point_mask is not None:
             if point_labels is None:
                 point_labels = torch.ones(
                     batch_size,
@@ -423,13 +464,18 @@ class GeometryEncoder(nn.Module):
                 point_mask,
                 point_labels,
                 normalized_img_feats,
+                drop_spatial_bias=drop_spatial_bias,
             )
-            prompt_embeds, prompt_mask = concat_padded_sequences(
-                prompt_embeds,
-                prompt_mask,
-                point_embeds,
-                pt_mask,
-            )
+            if prompt_embeds is None:
+                prompt_embeds = point_embeds
+                prompt_mask = pt_mask
+            else:
+                prompt_embeds, prompt_mask = concat_padded_sequences(
+                    prompt_embeds,
+                    prompt_mask,
+                    point_embeds,
+                    pt_mask,
+                )
 
         # Add CLS token (always valid)
         cls_embed = self.cls_embed.weight.view(1, self.hidden_size).unsqueeze(0).expand(batch_size, -1, -1)
@@ -1017,10 +1063,10 @@ class Sam3Model(nn.Module):
         projection = nn.Linear(text_hidden, detr_hidden)
         return encoder, projection
 
-    def _get_scoring_features(
+    def _get_scoring_features(  # noqa: PLR6301
         self,
-        text_features: torch.Tensor,
-        text_mask: torch.Tensor | None,
+        text_features: torch.Tensor,  # noqa: ARG002
+        text_mask: torch.Tensor | None,  # noqa: ARG002
         encoder_text_features: torch.Tensor,
         combined_prompt_mask: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -1047,7 +1093,7 @@ class Sam3Model(nn.Module):
         return encoder_text_features, combined_prompt_mask
 
     @classmethod
-    def from_pretrained(
+    def from_pretrained(  # noqa: C901
         cls,
         pretrained_model_name_or_path: str,
         device: str | torch.device | None = None,
@@ -1187,7 +1233,7 @@ class Sam3Model(nn.Module):
         """
         return self.vision_encoder(pixel_values, **kwargs)
 
-    def forward(
+    def forward(  # noqa: C901, PLR0915
         self,
         pixel_values: torch.FloatTensor | None = None,
         vision_embeds: dict[str, torch.Tensor] | None = None,
@@ -1198,9 +1244,17 @@ class Sam3Model(nn.Module):
         input_boxes_labels: torch.LongTensor | None = None,
         input_points: torch.FloatTensor | None = None,
         input_points_labels: torch.LongTensor | None = None,
+        precomputed_geometry_features: torch.FloatTensor | None = None,
+        precomputed_geometry_mask: torch.Tensor | None = None,
+        drop_spatial_bias: bool = False,
         **kwargs: dict,
     ) -> dict[str, torch.Tensor | None]:
         """Predict instance masks, boxes, and logits for input images.
+
+        Supports three geometry conditioning modes:
+        1. Precomputed geometry features (cross-image exemplar mode)
+        2. Box/point prompts on this image (same-image classic mode)
+        3. Text-only (no geometry conditioning)
 
         Args:
             pixel_values (torch.FloatTensor | None): Input images [batch_size,
@@ -1223,6 +1277,15 @@ class Sam3Model(nn.Module):
                 normalized to [0, 1] [batch_size, num_points, 2]. Default: None.
             input_points_labels (torch.LongTensor | None): Point labels (1=positive,
                 0=negative) [batch_size, num_points]. Default: None.
+            precomputed_geometry_features (torch.FloatTensor | None): Pre-computed
+                geometry prompt features from a reference image [batch_size,
+                num_prompts, hidden_size]. When provided, input_boxes/points are
+                ignored. Default: None.
+            precomputed_geometry_mask (torch.Tensor | None): Attention mask for
+                precomputed geometry features [batch_size, num_prompts].
+                Default: None.
+            drop_spatial_bias (bool): If True, skip coordinate projection and
+                position encoding in geometry encoder. Default: False.
             **kwargs (dict): Additional keyword arguments for model components.
 
         Returns:
@@ -1272,7 +1335,15 @@ class Sam3Model(nn.Module):
         geometry_prompt_features = None
         geometry_prompt_mask = None
 
-        if has_geometry_prompts:
+        if precomputed_geometry_features is not None:
+            # Use pre-computed exemplar features (cross-image visual query mode)
+            geometry_prompt_features = precomputed_geometry_features
+            geometry_prompt_mask = precomputed_geometry_mask
+        elif has_geometry_prompts:
+            # Prepare box prompt arguments
+            box_embeddings = None
+            box_mask_t = None
+            box_labels = None
             if has_box_prompts:
                 box_embeddings = input_boxes.to(dtype=text_features.dtype)  # [batch_size, num_boxes, 4]
                 box_labels = (
@@ -1280,16 +1351,12 @@ class Sam3Model(nn.Module):
                     if input_boxes_labels is not None
                     else torch.ones_like(box_embeddings[..., 0], dtype=torch.long)
                 )
-                box_mask = (
+                box_mask_t = (
                     (input_boxes_labels != -10)
                     if input_boxes_labels is not None
                     else torch.ones(batch_size, input_boxes.shape[1], dtype=torch.bool, device=device)
                 )
                 box_labels = torch.where(box_labels == -10, 0, box_labels)
-            else:
-                box_embeddings = torch.zeros(batch_size, 0, 4, dtype=text_features.dtype, device=device)
-                box_labels = torch.zeros(batch_size, 0, dtype=torch.long, device=device)
-                box_mask = torch.zeros(batch_size, 0, dtype=torch.bool, device=device)
 
             # Prepare point prompt arguments
             pt_embeddings = None
@@ -1306,13 +1373,14 @@ class Sam3Model(nn.Module):
 
             geometry_outputs = self.geometry_encoder(
                 box_embeddings=box_embeddings,
-                box_mask=box_mask,
+                box_mask=box_mask_t,
                 box_labels=box_labels,
                 img_feats=fpn_hidden_states,
                 img_pos_embeds=fpn_position_encoding,
                 point_embeddings=pt_embeddings,
                 point_mask=pt_mask,
                 point_labels=pt_labels,
+                drop_spatial_bias=drop_spatial_bias,
             )
 
             geometry_prompt_features = geometry_outputs["last_hidden_state"]

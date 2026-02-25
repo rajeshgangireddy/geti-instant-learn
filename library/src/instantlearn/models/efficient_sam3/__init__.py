@@ -11,8 +11,9 @@ detection and segmentation pipeline.
 """
 
 from instantlearn.models.sam3.post_processing import PostProcessingConfig
+from instantlearn.models.sam3.sam3 import Sam3PromptMode
 
 from .efficient_sam3 import EfficientSAM3
 from .model import EfficientSam3Model
 
-__all__ = ["EfficientSAM3", "EfficientSam3Model", "PostProcessingConfig"]
+__all__ = ["EfficientSAM3", "EfficientSam3Model", "PostProcessingConfig", "Sam3PromptMode"]
