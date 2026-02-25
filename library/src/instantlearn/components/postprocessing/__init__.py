@@ -11,7 +11,8 @@ automatically included in ONNX export when traceable.
 Overlap resolution:
     - :class:`MaskNMS` — mask-IoU based NMS
     - :class:`BoxNMS` — box-IoU based NMS (fastest)
-    - :class:`MaskIoMNMS` — IoM based NMS (best for nested objects)
+    - :class:`MaskIoMNMS` — mask-IoM based NMS (best for nested objects)
+    - :class:`BoxIoMNMS` — box-IoM based NMS (fast + handles nesting)
     - :class:`SoftNMS` — Gaussian score decay
     - :class:`PanopticArgmaxAssignment` — pixel-level argmax overlap resolution
 
@@ -50,10 +51,11 @@ from .connected_components import ConnectedComponentFilter, HoleFilling
 from .filtering import MinimumAreaFilter
 from .merge import MergePerClassMasks
 from .morphology import MorphologicalClosing, MorphologicalOpening
-from .nms import BoxNMS, MaskIoMNMS, MaskNMS, SoftNMS
+from .nms import BoxIoMNMS, BoxNMS, MaskIoMNMS, MaskNMS, SoftNMS
 from .overlap import PanopticArgmaxAssignment
 
 __all__ = [
+    "BoxIoMNMS",
     "BoxNMS",
     "ConnectedComponentFilter",
     "HoleFilling",

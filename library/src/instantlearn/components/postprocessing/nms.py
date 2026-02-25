@@ -4,7 +4,7 @@
 """Non-Maximum Suppression post-processors for segmentation masks.
 
 Provides NMS variants operating on mask IoU, box IoU, mask IoM
-(Intersection over Minimum), and Soft-NMS with Gaussian score decay.
+(Intersection over Minimum), box IoM, and Soft-NMS with Gaussian score decay.
 All implementations use pure PyTorch and are ONNX-exportable.
 """
 
@@ -133,6 +133,78 @@ class BoxNMS(PostProcessor):
 
         boxes = masks_to_boxes_traceable(masks)
         keep = torchvision_nms(boxes.float(), scores.float(), self.iou_threshold)
+        return masks[keep], scores[keep], labels[keep]
+
+
+def _pairwise_box_iom(boxes: torch.Tensor) -> torch.Tensor:
+    """Compute pairwise IoM (Intersection over Minimum area) between boxes.
+
+    IoM is defined as ``intersection_area / min(area_i, area_j)``.
+    Boxes are in ``(x1, y1, x2, y2)`` format.
+
+    Args:
+        boxes: Bounding boxes ``[N, 4]``.
+
+    Returns:
+        IoM matrix ``[N, N]`` with values in ``[0, 1]``.
+    """
+    x1 = boxes[:, 0]
+    y1 = boxes[:, 1]
+    x2 = boxes[:, 2]
+    y2 = boxes[:, 3]
+    areas = (x2 - x1).clamp(min=0) * (y2 - y1).clamp(min=0)  # [N]
+
+    # Pairwise intersection
+    inter_x1 = torch.maximum(x1.unsqueeze(0), x1.unsqueeze(1))  # [N, N]
+    inter_y1 = torch.maximum(y1.unsqueeze(0), y1.unsqueeze(1))
+    inter_x2 = torch.minimum(x2.unsqueeze(0), x2.unsqueeze(1))
+    inter_y2 = torch.minimum(y2.unsqueeze(0), y2.unsqueeze(1))
+    inter_area = (inter_x2 - inter_x1).clamp(min=0) * (inter_y2 - inter_y1).clamp(min=0)
+
+    min_areas = torch.minimum(areas.unsqueeze(0), areas.unsqueeze(1))
+    return inter_area / (min_areas + 1e-6)
+
+
+class BoxIoMNMS(PostProcessor):
+    """Non-Maximum Suppression using bounding-box IoM (Intersection over Minimum).
+
+    Like :class:`MaskIoMNMS` but operates on bounding boxes derived from masks,
+    making it faster while still handling nested/contained objects well.
+    A small box fully inside a larger one gets IoM ≈ 1.0 (suppressed),
+    whereas IoU would be low (kept).
+
+    Args:
+        iom_threshold: IoM threshold above which a lower-scored mask
+            is suppressed. Default: ``0.3``.
+    """
+
+    def __init__(self, iom_threshold: float = 0.3) -> None:
+        """Initialize BoxIoMNMS with the given IoM threshold."""
+        super().__init__()
+        self.iom_threshold = iom_threshold
+
+    def forward(
+        self,
+        masks: torch.Tensor,
+        scores: torch.Tensor,
+        labels: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Apply box-IoM NMS.
+
+        Args:
+            masks: Binary masks ``[N, H, W]``.
+            scores: Confidence scores ``[N]``.
+            labels: Category labels ``[N]``.
+
+        Returns:
+            Filtered (masks, scores, labels).
+        """
+        if masks.size(0) <= 1:
+            return masks, scores, labels
+
+        boxes = masks_to_boxes_traceable(masks)
+        iom_matrix = _pairwise_box_iom(boxes.float())
+        keep = _greedy_nms(scores, iom_matrix, self.iom_threshold)
         return masks[keep], scores[keep], labels[keep]
 
 
