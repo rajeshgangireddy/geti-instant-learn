@@ -227,19 +227,6 @@ notice-rgx = '# Copyright \(C\) (\d{4}(-\d{4})?) Intel Corporation\r?\n# SPDX-Li
     "PLR6301",  # Ignore no-self-use for test methods
     "S101",     # Use of assert detected
 ]
-"examples/**/*.ipynb" = [
-    "T201",     # print() is expected in example notebooks
-    "ANN001",   # Missing type annotations (notebook helpers)
-    "ANN201",   # Missing return type annotations
-    "D417",     # Missing docstring arg descriptions (notebook helpers)
-    "S101",     # assert is fine in notebooks
-    "NPY002",   # Legacy np.random usage
-    "ERA001",   # Commented-out code for experimentation
-    "PLC2801",  # Dunder calls in notebook setup
-    "CPY001",   # Copyright notice not needed in notebooks
-    "B007",     # Unused loop variable
-    "RUF001",   # Ambiguous unicode (e.g. × in display strings)
-]
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
