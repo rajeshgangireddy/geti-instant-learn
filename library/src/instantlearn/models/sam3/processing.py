@@ -173,6 +173,12 @@ class Sam3PromptPreprocessor(nn.Module):
         >>> boxes, points = preprocessor(sizes, input_points=[150, 150])
         >>> points.shape
         torch.Size([1, 1, 2])
+        >>> # Both boxes and points
+        >>> boxes, points = preprocessor(
+        ...     sizes,
+        ...     input_boxes=torch.tensor([[[100, 100, 200, 200]]]),
+        ...     input_points=torch.tensor([[[150, 150]]]),
+        ... )
     """
 
     def __init__(self, target_size: int = 1008, pad_value: float = -10.0) -> None:
@@ -291,8 +297,16 @@ class Sam3PromptPreprocessor(nn.Module):
         Example:
             >>> preprocessor = Sam3PromptPreprocessor()
             >>> sizes = torch.tensor([[480, 640]], dtype=torch.int32)
+            >>> # Box only
             >>> boxes, points = preprocessor(sizes, input_boxes=[100, 100, 200, 200])
+            >>> # Point only
             >>> boxes, points = preprocessor(sizes, input_points=[150, 200])
+            >>> # Both
+            >>> boxes, points = preprocessor(
+            ...     sizes,
+            ...     input_boxes=torch.tensor([[[100, 100, 200, 200]]]),
+            ...     input_points=torch.tensor([[[150, 200]]]),
+            ... )
         """
         normalized_boxes = None
         normalized_points = None

@@ -5,6 +5,7 @@
 
 import logging
 from collections import defaultdict
+from contextlib import nullcontext
 from enum import Enum
 from itertools import zip_longest
 
@@ -82,7 +83,7 @@ class SAM3(Model):
         >>> sam3_ve = SAM3(prompt_mode=Sam3PromptMode.VISUAL_EXEMPLAR)
         >>> ref_sample = Sample(
         ...     image=torch.zeros((3, 1024, 1024)),
-        ...     bboxes=np.array([[100, 100, 200, 200]]),
+        ...     bboxes=np.array([[100, 100, 200, 200]]),  # [x1, y1, x2, y2] on reference
         ...     category_ids=np.array([0]),
         ... )
         >>> sam3_ve.fit(ref_sample)
@@ -92,11 +93,22 @@ class SAM3(Model):
         >>> sam3_pt = SAM3(prompt_mode=Sam3PromptMode.VISUAL_EXEMPLAR)
         >>> ref_sample = Sample(
         ...     image=torch.zeros((3, 1024, 1024)),
-        ...     points=np.array([[150, 150]]),
+        ...     points=np.array([[150, 150]]),  # [x, y] on reference
         ...     category_ids=np.array([0]),
         ... )
         >>> sam3_pt.fit(ref_sample)
         >>> results = sam3_pt.predict(Sample(image=torch.zeros((3, 1024, 1024))))
+
+        >>> # N-shot: multiple point prompts for the same category (same image)
+        >>> sam3_nshot = SAM3(prompt_mode=Sam3PromptMode.VISUAL_EXEMPLAR)
+        >>> ref_sample = Sample(
+        ...     image=torch.zeros((3, 1024, 1024)),
+        ...     points=np.array([[100, 100], [200, 300], [400, 500]]),  # 3 shots
+        ...     categories=["shoe", "shoe", "shoe"],
+        ...     category_ids=np.array([0, 0, 0]),  # same category
+        ... )
+        >>> sam3_nshot.fit(ref_sample)  # encodes 3 points together
+        >>> results = sam3_nshot.predict(Sample(image=torch.zeros((3, 1024, 1024))))
 
         >>> # N-shot across multiple reference images
         >>> sam3_cross = SAM3(prompt_mode=Sam3PromptMode.VISUAL_EXEMPLAR)
@@ -111,10 +123,10 @@ class SAM3(Model):
         ...         image=torch.zeros((3, 1024, 1024)),
         ...         points=np.array([[200, 200]]),
         ...         categories=["shoe"],
-        ...         category_ids=np.array([0]),
+        ...         category_ids=np.array([0]),  # same category, different image
         ...     ),
         ... ]
-        >>> sam3_cross.fit(refs)
+        >>> sam3_cross.fit(refs)  # features concatenated across images
         >>> results = sam3_cross.predict(Sample(image=torch.zeros((3, 1024, 1024))))
     """
 
@@ -125,6 +137,7 @@ class SAM3(Model):
         resolution: int = 1008,
         precision: str = "fp32",
         compile_models: bool = False,
+        model_id: str = "facebook/sam3",
         post_processing: PostProcessingConfig | None = None,
         prompt_mode: Sam3PromptMode | str = Sam3PromptMode.CLASSIC,
         drop_spatial_bias: bool = False,
@@ -137,6 +150,8 @@ class SAM3(Model):
             resolution: The input image resolution.
             precision: The precision to use for the model ('bf16' or 'fp32').
             compile_models: Whether to compile the models.
+            model_id: HuggingFace model ID or local path to load the SAM3 model
+                and tokenizer from. Default: "facebook/sam3".
             post_processing: Optional post-processing configuration for NMS,
                 mask overlap removal, and non-overlapping pixel constraints.
             prompt_mode: Prompt mode for inference. 'classic' for original SAM3
@@ -153,6 +168,7 @@ class SAM3(Model):
         self.resolution = resolution
         self.precision = precision
         self.compile_models = compile_models
+        self.model_id = model_id
         self.prompt_mode = Sam3PromptMode(prompt_mode)
         self.drop_spatial_bias = drop_spatial_bias
 
@@ -177,16 +193,48 @@ class SAM3(Model):
         ).to(device)
 
         # Tokenizer for text prompts (still from transformers, but not used in ONNX path)
-        self.tokenizer = CLIPTokenizerFast.from_pretrained("jetjodh/sam3")
+        self.tokenizer = CLIPTokenizerFast.from_pretrained(model_id)
 
         self.model = (
             Sam3Model.from_pretrained(
-                "jetjodh/sam3",
+                model_id,
                 torch_dtype=precision_to_torch_dtype(precision),
             )
             .to(device)
             .eval()
         )
+
+    # -- Hook methods for subclass customization --
+
+    def _get_autocast_context(self) -> torch.autocast | nullcontext:
+        """Return the autocast context manager for model inference.
+
+        SAM3 uses no autocast (nullcontext). Subclasses like EfficientSAM3
+        override this to enable torch.autocast for mixed-precision inference.
+
+        Returns:
+            A context manager (nullcontext or torch.autocast).
+        """
+        return nullcontext()
+
+    def _tokenize(self, texts: list[str]) -> dict[str, torch.Tensor]:
+        """Tokenize text prompts with model-specific settings.
+
+        SAM3 uses max_length=32 with default padding. Subclasses can override
+        for different tokenizer configurations (e.g. different max_length,
+        truncation).
+
+        Args:
+            texts: List of text strings to tokenize.
+
+        Returns:
+            Tokenizer output dict with input_ids and attention_mask on device.
+        """
+        text_inputs = self.tokenizer(texts, return_tensors="pt", padding="max_length", max_length=32)
+        return {
+            "input_ids": text_inputs.input_ids.to(self.device),
+            "attention_mask": text_inputs.attention_mask.to(self.device),
+        }
 
     # -- Public API --
 
@@ -252,6 +300,9 @@ class SAM3(Model):
         between shots from the same image. Features from different images for the
         same category are concatenated, giving the DETR decoder richer conditioning.
 
+        This means passing 3 point prompts for "shoe" produces a single, stronger
+        exemplar rather than 3 separate weak ones.
+
         Note:
             Both boxes and points are encoded as point-only because point encoding
             transfers better across images (0.83 vs 0.59 mIoU): grid_sample at a
@@ -300,7 +351,9 @@ class SAM3(Model):
 
         Iterates over every sample in the batch so that the same category can
         accumulate geometry features from different reference images (cross-image
-        n-shot).
+        n-shot).  For example, two samples each containing a "shoe" box will both
+        append to ``encoded_by_category[shoe_id]``; the downstream aggregation step
+        concatenates those features to give the DETR decoder richer conditioning.
 
         Args:
             reference_batch: Batch of reference samples with images and bboxes/points.
@@ -347,8 +400,9 @@ class SAM3(Model):
 
         # Extract vision features
         image_tensor = sample.image.unsqueeze(0) if sample.image.ndim == 3 else sample.image
-        pixel_values, original_sizes = self.image_preprocessor(image_tensor.to(self.device))
-        vision_embeds = self.model.get_vision_features(pixel_values)
+        with self._get_autocast_context():
+            pixel_values, original_sizes = self.image_preprocessor(image_tensor.to(self.device))
+            vision_embeds = self.model.get_vision_features(pixel_values)
         fpn_hidden_states = vision_embeds["fpn_hidden_states"][:-1]
         fpn_position_encoding = vision_embeds["fpn_position_encoding"][:-1]
 
@@ -367,23 +421,24 @@ class SAM3(Model):
                 coord = input_boxes[..., :2]  # box center (1, 1, 2)
             else:
                 _, coord = self.prompt_preprocessor(original_sizes, input_points=prompt)
-            cat_id_int = int(cat_id)
-            category_coords[cat_id_int].append(coord)
-            category_text_map[cat_id_int] = category
+            cat_id = int(cat_id)
+            category_coords[cat_id].append(coord)
+            category_text_map[cat_id] = category
 
         # Encode each category's points together (same-image n-shot batching)
         for cat_id, coords_list in category_coords.items():
             all_coords = torch.cat(coords_list, dim=1)  # [1, N, 2]
             num_points = all_coords.shape[1]
 
-            geometry_outputs = self.model.geometry_encoder(
-                point_embeddings=all_coords.to(dtype=fpn_hidden_states[0].dtype),
-                point_mask=torch.ones(1, num_points, dtype=torch.bool, device=self.device),
-                point_labels=torch.ones((1, num_points), dtype=torch.long, device=self.device),
-                img_feats=fpn_hidden_states,
-                img_pos_embeds=fpn_position_encoding,
-                drop_spatial_bias=self.drop_spatial_bias,
-            )
+            with self._get_autocast_context():
+                geometry_outputs = self.model.geometry_encoder(
+                    point_embeddings=all_coords.to(dtype=fpn_hidden_states[0].dtype),
+                    point_mask=torch.ones(1, num_points, dtype=torch.bool, device=self.device),
+                    point_labels=torch.ones((1, num_points), dtype=torch.long, device=self.device),
+                    img_feats=fpn_hidden_states,
+                    img_pos_embeds=fpn_position_encoding,
+                    drop_spatial_bias=self.drop_spatial_bias,
+                )
             encoded_by_category[cat_id].append((
                 geometry_outputs["last_hidden_state"],
                 geometry_outputs["attention_mask"],
@@ -427,7 +482,7 @@ class SAM3(Model):
         self,
         text_prompts: list[str],
     ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-        """Tokenize and embed text prompts, cache unique results.
+        """Tokenize and embed text prompts.
 
         Args:
             text_prompts: Text prompts aligned with exemplar categories.
@@ -438,13 +493,14 @@ class SAM3(Model):
         unique_prompts = list(dict.fromkeys(text_prompts))
         text_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
         for prompt in unique_prompts:
-            text_inputs = self.tokenizer([prompt], return_tensors="pt", padding="max_length", max_length=32)
-            input_ids = text_inputs.input_ids.to(self.device)
-            attention_mask = text_inputs.attention_mask.to(self.device)
-            text_outputs = self.model.get_text_features(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-            )
+            tokenized = self._tokenize([prompt])
+            input_ids = tokenized["input_ids"]
+            attention_mask = tokenized["attention_mask"]
+            with self._get_autocast_context():
+                text_outputs = self.model.get_text_features(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                )
             text_cache[prompt] = (text_outputs.pooler_output, attention_mask.bool())
 
         return (
@@ -478,7 +534,7 @@ class SAM3(Model):
 
             # Preprocess image
             image_tensor = sample.image.unsqueeze(0) if sample.image.ndim == 3 else sample.image
-            with torch.no_grad():
+            with torch.no_grad(), self._get_autocast_context():
                 pixel_values, original_sizes = self.image_preprocessor(image_tensor.to(self.device))
                 vision_embeds = self.model.get_vision_features(pixel_values)
 
@@ -500,14 +556,9 @@ class SAM3(Model):
 
             for text, bbox, point, cat_id in zip_longest(texts, bboxes, points, category_ids, fillvalue=None):
                 # Tokenize text prompt (default to "visual" for visual-only prompts)
-                text_inputs = self.tokenizer(
-                    [text or "visual"],
-                    return_tensors="pt",
-                    padding="max_length",
-                    max_length=32,
-                )
-                input_ids = text_inputs.input_ids.to(self.device)
-                attention_mask = text_inputs.attention_mask.to(self.device)
+                tokenized = self._tokenize([text or "visual"])
+                input_ids = tokenized["input_ids"]
+                attention_mask = tokenized["attention_mask"]
 
                 # Prepare box inputs if bbox is provided (xyxy format)
                 input_boxes = None
@@ -523,7 +574,7 @@ class SAM3(Model):
                     _, input_points = self.prompt_preprocessor(original_sizes, input_points=point)
                     input_points_labels = torch.ones((1, 1), dtype=torch.long, device=self.device)
 
-                with torch.no_grad():
+                with torch.no_grad(), self._get_autocast_context():
                     outputs = self.model(
                         vision_embeds=vision_embeds,
                         input_ids=input_ids,
@@ -575,7 +626,7 @@ class SAM3(Model):
 
             # Preprocess target image
             image_tensor = sample.image.unsqueeze(0) if sample.image.ndim == 3 else sample.image
-            with torch.no_grad():
+            with torch.no_grad(), self._get_autocast_context():
                 pixel_values, _ = self.image_preprocessor(image_tensor.to(self.device))
                 vision_embeds = self.model.get_vision_features(pixel_values)
 
@@ -592,13 +643,14 @@ class SAM3(Model):
                 self.exemplar_category_ids,
                 strict=True,
             ):
-                outputs = self.model(
-                    vision_embeds=vision_embeds,
-                    text_embeds=text_feats,
-                    attention_mask=text_mask.long(),
-                    precomputed_geometry_features=geo_feats,
-                    precomputed_geometry_mask=geo_mask,
-                )
+                with torch.no_grad(), self._get_autocast_context():
+                    outputs = self.model(
+                        vision_embeds=vision_embeds,
+                        text_embeds=text_feats,
+                        attention_mask=text_mask.long(),
+                        precomputed_geometry_features=geo_feats,
+                        precomputed_geometry_mask=geo_mask,
+                    )
 
                 # Postprocess
                 result = self.postprocessor(outputs, target_sizes=[img_size])
