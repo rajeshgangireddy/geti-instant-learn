@@ -174,7 +174,7 @@ def convert_masks_to_one_hot_tensor(
     return batch_pred_tensors, batch_gt_tensors
 
 
-def load_model(sam: SAMModelName, model_name: ModelName, args: Namespace) -> Model:
+def load_model(sam: SAMModelName, model_name: ModelName, args: Namespace) -> Model:  # noqa: PLR0911
     """Instantiate and return the requested model.
 
     Args:

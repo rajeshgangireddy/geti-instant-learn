@@ -206,7 +206,7 @@ class SAM3(Model):
 
     # -- Hook methods for subclass customization --
 
-    def _get_autocast_context(self) -> torch.autocast | nullcontext:
+    def _get_autocast_context(self) -> torch.autocast | nullcontext:  # noqa: PLR6301
         """Return the autocast context manager for model inference.
 
         SAM3 uses no autocast (nullcontext). Subclasses like EfficientSAM3
@@ -421,9 +421,9 @@ class SAM3(Model):
                 coord = input_boxes[..., :2]  # box center (1, 1, 2)
             else:
                 _, coord = self.prompt_preprocessor(original_sizes, input_points=prompt)
-            cat_id = int(cat_id)
-            category_coords[cat_id].append(coord)
-            category_text_map[cat_id] = category
+            cat_id_int = int(cat_id)
+            category_coords[cat_id_int].append(coord)
+            category_text_map[cat_id_int] = category
 
         # Encode each category's points together (same-image n-shot batching)
         for cat_id, coords_list in category_coords.items():
