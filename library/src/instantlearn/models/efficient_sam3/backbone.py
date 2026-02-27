@@ -159,10 +159,10 @@ class StudentVisionModel(nn.Module):
             normalize=True,
         )
         self.convs = nn.ModuleList()
-        scale_factors = [4.0, 2.0, 1.0, 0.5]
-        for scale in scale_factors:
+        scale_4x, scale_2x, scale_1x, scale_half = 0, 1, 2, 3
+        for scale_idx in range(4):
             current = nn.Sequential()
-            if scale == 4.0:
+            if scale_idx == scale_4x:
                 current.add_module(
                     "dconv_2x2_0",
                     nn.ConvTranspose2d(
@@ -183,7 +183,7 @@ class StudentVisionModel(nn.Module):
                     ),
                 )
                 out_dim = IMAGE_ENCODER_EMBED_DIM // 4
-            elif scale == 2.0:
+            elif scale_idx == scale_2x:
                 current.add_module(
                     "dconv_2x2",
                     nn.ConvTranspose2d(
@@ -194,13 +194,13 @@ class StudentVisionModel(nn.Module):
                     ),
                 )
                 out_dim = IMAGE_ENCODER_EMBED_DIM // 2
-            elif scale == 1.0:
+            elif scale_idx == scale_1x:
                 out_dim = IMAGE_ENCODER_EMBED_DIM
-            elif scale == 0.5:
+            elif scale_idx == scale_half:
                 current.add_module("maxpool_2x2", nn.MaxPool2d(kernel_size=2, stride=2))
                 out_dim = IMAGE_ENCODER_EMBED_DIM
             else:
-                msg = f"Unsupported scale_factor={scale}"
+                msg = f"Unsupported scale index={scale_idx}"
                 raise ValueError(msg)
 
             current.add_module("conv_1x1", nn.Conv2d(out_dim, fpn_hidden_size, kernel_size=1))

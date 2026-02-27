@@ -409,14 +409,14 @@ class GeometryEncoder(nn.Module):
                 position encoding in box/point encoding, keeping only pooled
                 visual features. Default: False.
 
-        Raises:
-            ValueError: If neither box nor point embeddings are provided to
-                determine batch size for CLS token and attention mask creation.
-
         Returns:
             dict[str, torch.Tensor]: Dictionary with 'last_hidden_state' containing
                 encoded geometry features [batch_size, num_prompts, hidden_size]
                 and 'attention_mask' for padding.
+
+        Raises:
+            ValueError: If neither box nor point embeddings are provided to
+                determine batch size for CLS token and attention mask creation.
         """
         # Determine batch size from available inputs
         if box_embeddings is not None:

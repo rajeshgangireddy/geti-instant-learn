@@ -92,14 +92,14 @@ class Sam3Preprocessor(nn.Module):
             pixel_values: Input image tensor with shape (B, C, H, W).
                          Can be uint8 (0-255) or float (0-1).
 
-        Raises:
-            ValueError: If input tensor does not have 4 dimensions or if the number of channels is not 3.
-
         Returns:
             Tuple containing:
                 - pixel_values: Preprocessed image tensor with shape (B, 3, target_size, target_size)
                   and SAM3 normalized values (range [-1, 1]).
                 - original_sizes: Tensor with shape (B, 2) containing [height, width] of input images.
+
+        Raises:
+            ValueError: If input tensor does not have 4 dimensions or if the number of channels is not 3.
 
         Example:
             >>> preprocessor = Sam3Preprocessor(target_size=1008)

@@ -13,9 +13,12 @@ autocast behavior, tokenizer configuration, and model initialization.
 from __future__ import annotations
 
 import logging
-from contextlib import nullcontext
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from contextlib import nullcontext
 from transformers import CLIPTokenizerFast
 
 from instantlearn.models.sam3.post_processing import PostProcessingConfig
@@ -126,7 +129,7 @@ class EfficientSAM3(SAM3):
         """
         # Skip SAM3.__init__ -- we initialize nn.Module and set attributes directly
         # because EfficientSAM3 uses different model, tokenizer, and defaults.
-        super(SAM3, self).__init__()  # noqa: UP008
+        super(SAM3, self).__init__()
 
         key = (backbone_type, variant)
         if key not in BACKBONE_CONFIG:

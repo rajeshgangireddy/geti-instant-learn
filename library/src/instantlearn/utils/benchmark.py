@@ -40,11 +40,11 @@ def prepare_output_directory(output_path: str, overwrite: bool) -> Path:
         output_path: The path to the output data
         overwrite: Whether to overwrite existing data
 
-    Raises:
-        ValueError: If the output path already exists and overwrite is False
-
     Returns:
         The path to the output data
+
+    Raises:
+        ValueError: If the output path already exists and overwrite is False
     """
     output_path_obj = Path(output_path)
     if output_path_obj.exists():
