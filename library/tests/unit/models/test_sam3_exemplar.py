@@ -32,9 +32,7 @@ from instantlearn.models.sam3.model import GeometryEncoder, Sam3Model
 from instantlearn.models.sam3.processing import Sam3PromptPreprocessor
 from instantlearn.models.sam3.sam3 import SAM3, Sam3PromptMode
 
-# ---------------------------------------------------------------------------
 # Sam3PromptMode
-# ---------------------------------------------------------------------------
 
 
 class TestSam3PromptMode:
@@ -67,9 +65,7 @@ class TestSam3PromptMode:
         assert mode == "classic"
 
 
-# ---------------------------------------------------------------------------
 # Sam3PromptPreprocessor new API
-# ---------------------------------------------------------------------------
 
 
 class TestSam3PromptPreprocessorAPI:
@@ -136,11 +132,7 @@ class TestSam3PromptPreprocessorAPI:
         assert boxes.max() <= 1.5  # cxcywh can exceed 1 for w/h at edges
 
 
-# ---------------------------------------------------------------------------
 # Helpers: mock model factory
-# ---------------------------------------------------------------------------
-
-
 def _mock_sam3_model() -> MagicMock:
     """Create a mock Sam3Model that chains .to().eval()."""
     mock = MagicMock()
@@ -149,11 +141,7 @@ def _mock_sam3_model() -> MagicMock:
     return mock
 
 
-# ---------------------------------------------------------------------------
 # SAM3 class — init and prompt mode
-# ---------------------------------------------------------------------------
-
-
 class TestSAM3Init:
     """Tests for SAM3 initialization with prompt mode params."""
 
@@ -182,11 +170,7 @@ class TestSAM3Init:
             SAM3(device="cpu", prompt_mode="nonexistent")
 
 
-# ---------------------------------------------------------------------------
 # SAM3 class — _build_category_mapping
-# ---------------------------------------------------------------------------
-
-
 class TestBuildCategoryMapping:
     """Tests for SAM3._build_category_mapping static method."""
 
@@ -214,11 +198,7 @@ class TestBuildCategoryMapping:
         assert mapping == {}
 
 
-# ---------------------------------------------------------------------------
 # SAM3 class — _aggregate_results
-# ---------------------------------------------------------------------------
-
-
 class TestAggregateResults:
     """Tests for SAM3._aggregate_results static method."""
 
@@ -250,11 +230,7 @@ class TestAggregateResults:
         assert result["pred_masks"].shape == (2, 10, 10)
 
 
-# ---------------------------------------------------------------------------
 # SAM3 class — visual exemplar fit error handling
-# ---------------------------------------------------------------------------
-
-
 class TestSAM3ExemplarErrors:
     """Tests for SAM3 error handling in visual exemplar mode."""
 
@@ -293,11 +269,7 @@ class TestSAM3ExemplarErrors:
             sam3.fit(ref)
 
 
-# ---------------------------------------------------------------------------
 # EfficientSAM3 class — init and prompt mode
-# ---------------------------------------------------------------------------
-
-
 def _mock_efficient_sam3_model() -> MagicMock:
     """Create a mock EfficientSam3Model that chains .to().eval()."""
     mock = MagicMock()
@@ -355,11 +327,7 @@ class TestEfficientSAM3ExemplarErrors:
             model.predict(target)
 
 
-# ---------------------------------------------------------------------------
 # GeometryEncoder forward — optional boxes and drop_spatial_bias
-# ---------------------------------------------------------------------------
-
-
 class TestGeometryEncoderForward:
     """Tests for GeometryEncoder.forward with optional boxes and drop_spatial_bias."""
 
@@ -389,11 +357,7 @@ class TestGeometryEncoderForward:
         assert "point_labels" in params
 
 
-# ---------------------------------------------------------------------------
 # Sam3Model.forward — precomputed geometry features
-# ---------------------------------------------------------------------------
-
-
 class TestSam3ModelForwardSignature:
     """Tests for Sam3Model.forward signature additions."""
 
@@ -411,11 +375,7 @@ class TestSam3ModelForwardSignature:
         assert params["drop_spatial_bias"].default is False
 
 
-# ---------------------------------------------------------------------------
 # Exports
-# ---------------------------------------------------------------------------
-
-
 class TestExports:
     """Tests for Sam3PromptMode exports from all init files."""
 

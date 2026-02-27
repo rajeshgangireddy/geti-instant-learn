@@ -52,11 +52,7 @@ def overlapping_masks() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return scores, boxes, masks
 
 
-# ---------------------------------------------------------------------------
 # PostProcessingConfig
-# ---------------------------------------------------------------------------
-
-
 class TestPostProcessingConfig:
     """Tests for PostProcessingConfig defaults and construction."""
 
@@ -79,9 +75,7 @@ class TestPostProcessingConfig:
         assert config.non_overlapping_masks is True
 
 
-# ---------------------------------------------------------------------------
 # box_nms
-# ---------------------------------------------------------------------------
 
 
 class TestBoxNMS:

@@ -204,7 +204,7 @@ class SAM3(Model):
             .eval()
         )
 
-    # -- Hook methods for subclass customization --
+    # Hook methods for subclass customization
 
     def _get_autocast_context(self) -> torch.autocast | nullcontext:  # noqa: PLR6301
         """Return the autocast context manager for model inference.
