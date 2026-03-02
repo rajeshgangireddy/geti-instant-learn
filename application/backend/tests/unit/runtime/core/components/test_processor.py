@@ -46,7 +46,7 @@ class TestProcessor:
         self.mock_inbound_broadcaster.register.return_value = self.mock_in_queue
         self.mock_outbound_broadcaster = MagicMock(spec=FrameBroadcaster)
         self.mock_model_handler = MagicMock()
-        self.mock_model_handler.predict.side_effect = lambda batch: [{}] * len(batch)
+        self.mock_model_handler.predict.side_effect = lambda inputs: [{}] * len(inputs)
         self.runner = Processor(self.mock_model_handler, batch_size=3)
         self.runner.setup(self.mock_inbound_broadcaster, self.mock_outbound_broadcaster)
 
@@ -69,7 +69,7 @@ class TestProcessor:
                 raise Empty
 
         self.mock_in_queue.get.side_effect = mock_get
-        self.mock_inbound_broadcaster.register.assert_called_once()
+        self.mock_inbound_broadcaster.register.assert_called_once_with(Processor.__name__)
 
         self.runner.run()
 
@@ -81,7 +81,7 @@ class TestProcessor:
             assert isinstance(actual_output.frame, np.ndarray)
             assert isinstance(actual_output.results, list)
 
-        self.mock_inbound_broadcaster.unregister.assert_called_once_with(self.mock_in_queue)
+        self.mock_inbound_broadcaster.unregister.assert_called_once_with(Processor.__name__)
 
     def test_processor_breaks_batch_on_requires_manual_control(self):
         frame_with_manual_control = InputData(

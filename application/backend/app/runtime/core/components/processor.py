@@ -4,10 +4,7 @@
 import logging
 from queue import Empty, Queue
 
-import torch
-from instantlearn.data.base.batch import Batch
-from instantlearn.data.base.sample import Sample
-from torchvision import tv_tensors
+import numpy as np
 
 from domain.services.schemas.processor import InputData, OutputData
 from runtime.core.components.base import ModelHandler, PipelineComponent
@@ -15,7 +12,7 @@ from runtime.core.components.broadcaster import FrameBroadcaster
 
 logger = logging.getLogger(__name__)
 
-EMPTY_RESULT: dict[str, torch.Tensor] = {}
+EMPTY_RESULT: dict[str, np.ndarray] = {}
 
 
 class Processor(PipelineComponent):
@@ -42,7 +39,7 @@ class Processor(PipelineComponent):
     ) -> None:
         self._inbound_broadcaster = inbound_broadcaster
         self._outbound_broadcaster = outbound_broadcaster
-        self._in_queue: Queue[InputData] = inbound_broadcaster.register()
+        self._in_queue: Queue[InputData] = inbound_broadcaster.register(self.__class__.__name__)
         self._initialized = True
 
     def run(self) -> None:
@@ -56,6 +53,8 @@ class Processor(PipelineComponent):
                 for _ in range(self._batch_size):
                     try:
                         input_data = self._in_queue.get(timeout=0.1)
+                        if input_data.trace:
+                            input_data.trace.record_start("processor")
                         batch_data.append(input_data)
 
                         if input_data.context.get("requires_manual_control", False):
@@ -66,16 +65,16 @@ class Processor(PipelineComponent):
                 if not batch_data:
                     continue
 
-                samples = [
-                    Sample(image=tv_tensors.Image(torch.from_numpy(data.frame).permute(2, 0, 1))) for data in batch_data
-                ]
-                batch_results = self._model_handler.predict(Batch.collate(samples))
+                batch_results = self._model_handler.predict(batch_data)
 
                 for i, data in enumerate(batch_data):
-                    results: dict[str, torch.Tensor] = batch_results[i] if i < len(batch_results) else EMPTY_RESULT
+                    results: dict[str, np.ndarray] = batch_results[i] if i < len(batch_results) else EMPTY_RESULT
+                    if data.trace:
+                        data.trace.record_end("processor")
                     output_data = OutputData(
                         frame=data.frame,
                         results=[results],
+                        trace=data.trace,
                     )
                     self._outbound_broadcaster.broadcast(output_data)
 
@@ -86,4 +85,4 @@ class Processor(PipelineComponent):
         logger.debug("Stopping the pipeline runner loop")
 
     def _stop(self) -> None:
-        self._inbound_broadcaster.unregister(self._in_queue)
+        self._inbound_broadcaster.unregister(self.__class__.__name__)
