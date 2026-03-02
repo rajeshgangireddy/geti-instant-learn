@@ -484,12 +484,15 @@ class Sam3Postprocessor(nn.Module):
         kept_masks = (kept_masks > self.mask_threshold).to(torch.int64)
 
         # Apply configurable post-processing (NMS, IoM suppression, etc.)
-        kept_scores, kept_boxes, kept_masks = apply_post_processing(
-            kept_scores,
-            kept_boxes,
-            kept_masks,
-            self.post_processing,
-        )
+        # Skip during ONNX export: NMS and greedy suppression ops are not
+        # ONNX-traceable and would break export.
+        if not torch.onnx.is_in_onnx_export():
+            kept_scores, kept_boxes, kept_masks = apply_post_processing(
+                kept_scores,
+                kept_boxes,
+                kept_masks,
+                self.post_processing,
+            )
 
         return kept_scores, kept_boxes, kept_masks
 

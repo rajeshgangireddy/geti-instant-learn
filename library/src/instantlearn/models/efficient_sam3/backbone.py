@@ -8,6 +8,7 @@ and FPN neck to produce multi-scale features compatible with SAM3's DETR pipelin
 """
 
 import logging
+from typing import Any
 
 import timm
 import torch
@@ -213,8 +214,8 @@ class StudentVisionModel(nn.Module):
     def forward(
         self,
         pixel_values: torch.Tensor | None = None,
-        **kwargs: dict,  # noqa: ARG002
-    ) -> dict[str, torch.Tensor | None]:
+        **kwargs: Any,  # noqa: ANN401, ARG002
+    ) -> dict[str, Any]:
         """Extract multi-scale vision features.
 
         Args:

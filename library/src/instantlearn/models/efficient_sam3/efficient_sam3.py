@@ -188,7 +188,8 @@ class EfficientSAM3(SAM3):
 
     def _get_autocast_context(self) -> torch.autocast | nullcontext:
         """Return torch.autocast for mixed-precision student inference."""
-        return torch.autocast(device_type=self.device, dtype=precision_to_torch_dtype(self.precision))
+        device_type = torch.device(self.device).type
+        return torch.autocast(device_type=device_type, dtype=precision_to_torch_dtype(self.precision))
 
     def _tokenize(self, texts: list[str]) -> dict[str, torch.Tensor]:
         """Tokenize with student-specific settings (context length, truncation).

@@ -510,7 +510,7 @@ class SAM3(Model):
 
     # -- Predict internals --
 
-    def _predict_classic(self, target: Collatable) -> list[dict[str, torch.Tensor]]:
+    def _predict_classic(self, target: Collatable) -> list[dict[str, torch.Tensor]]:  # noqa: PLR0915
         """Classic SAM3 prediction with per-image text/box/point prompts.
 
         Args:
@@ -585,8 +585,22 @@ class SAM3(Model):
                         input_points_labels=input_points_labels,
                     )
 
-                # Postprocess
-                result = self.postprocessor(outputs, target_sizes=[img_size])
+                # Postprocess — thread pixel-space point prompts through to
+                # the postprocessor so point-aware mask filtering is applied.
+                pixel_points = None
+                pixel_points_labels = None
+                if point is not None and len(point):
+                    pt = torch.as_tensor(point, dtype=torch.float32)
+                    if pt.ndim == 1:
+                        pt = pt.unsqueeze(0)  # (2,) -> (1, 2)
+                    pixel_points = [pt.to(self.device)]
+                    pixel_points_labels = [torch.ones(pt.shape[0], dtype=torch.long, device=self.device)]
+                result = self.postprocessor(
+                    outputs,
+                    target_sizes=[img_size],
+                    input_points=pixel_points,
+                    input_points_labels=pixel_points_labels,
+                )
                 boxes_with_scores = torch.cat(
                     [result[0]["boxes"], result[0]["scores"].unsqueeze(1)],
                     dim=1,
@@ -652,7 +666,8 @@ class SAM3(Model):
                         precomputed_geometry_mask=geo_mask,
                     )
 
-                # Postprocess
+                # Postprocess — no raw point prompts needed here because
+                # geometry features were already encoded during fit().
                 result = self.postprocessor(outputs, target_sizes=[img_size])
                 boxes_with_scores = torch.cat(
                     [result[0]["boxes"], result[0]["scores"].unsqueeze(1)],
