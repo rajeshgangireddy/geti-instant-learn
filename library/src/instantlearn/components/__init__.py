@@ -7,8 +7,6 @@ from .cosine_similarity import CosineSimilarity
 from .encoders import ImageEncoder
 from .linear_sum_assignment import linear_sum_assignment
 from .postprocessing import (
-    ConnectedComponentFilter,
-    HoleFilling,
     MaskIoMNMS,
     MaskNMS,
     MergePerClassMasks,
@@ -24,9 +22,7 @@ from .postprocessing import (
 from .sam.decoder import SamDecoder
 
 __all__ = [
-    "ConnectedComponentFilter",
     "CosineSimilarity",
-    "HoleFilling",
     "ImageEncoder",
     "MaskIoMNMS",
     "MaskNMS",

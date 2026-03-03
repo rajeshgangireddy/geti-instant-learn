@@ -6,7 +6,9 @@
 This package provides chainable ``nn.Module`` post-processors that
 transform segmentation predictions (masks, scores, labels). They can
 be attached to any model via the ``postprocessor`` parameter and are
-automatically included in ONNX export when traceable.
+automatically included in ONNX export.
+
+All processors use pure PyTorch operations and are ONNX/OpenVINO exportable.
 
 Overlap resolution:
     - :class:`MaskNMS` — mask-IoU based NMS
@@ -21,13 +23,10 @@ Score filtering:
 
 Mask cleaning:
     - :class:`MinimumAreaFilter` — area threshold filter
-    - :class:`MorphologicalOpening` — remove small protrusions (ONNX-safe)
-    - :class:`MorphologicalClosing` — fill small holes (ONNX-safe)
-    - :class:`ConnectedComponentFilter` — remove small blobs (eager only)
-    - :class:`HoleFilling` — fill enclosed holes (eager only)
+    - :class:`MorphologicalOpening` — remove small protrusions
+    - :class:`MorphologicalClosing` — fill small holes
 
 Mask merging:
-    - :class:`InstanceMerge` — merge spatially connected same-label masks (eager only)
     - :class:`MergePerClassMasks` — OR-merge masks per class (one mask per label)
 
 Composition:
@@ -51,9 +50,8 @@ Examples:
 """
 
 from .base import PostProcessor, PostProcessorPipeline, apply_postprocessing
-from .connected_components import ConnectedComponentFilter, HoleFilling
 from .filtering import MinimumAreaFilter, ScoreFilter
-from .merge import InstanceMerge, MergePerClassMasks
+from .merge import MergePerClassMasks
 from .morphology import MorphologicalClosing, MorphologicalOpening
 from .nms import BoxIoMNMS, BoxNMS, MaskIoMNMS, MaskNMS, SoftNMS
 from .overlap import PanopticArgmaxAssignment
@@ -61,9 +59,6 @@ from .overlap import PanopticArgmaxAssignment
 __all__ = [
     "BoxIoMNMS",
     "BoxNMS",
-    "ConnectedComponentFilter",
-    "HoleFilling",
-    "InstanceMerge",
     "MaskIoMNMS",
     "MaskNMS",
     "MergePerClassMasks",

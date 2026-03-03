@@ -38,6 +38,13 @@ class EncoderForwardFeaturesWrapper(nn.Module):
         ignore_token_length: int,
         input_size: int = 512,
     ) -> None:
+        """Initialize the encoder wrapper.
+
+        Args:
+            encoder: The underlying encoder module.
+            ignore_token_length: Number of tokens to ignore.
+            input_size: Input image size.
+        """
         super().__init__()
         self.encoder = encoder
         self.ignore_token_length = ignore_token_length
@@ -72,21 +79,9 @@ class MatcherInferenceGraph(nn.Module):
         self.prompt_generator = prompt_generator
         self.sam_decoder = sam_decoder
 
-        # Register only ONNX-exportable post-processors as a proper submodule
+        # Register post-processor as a proper submodule
         # so parameters are captured during tracing/export.
-        export_pp: PostProcessor | None = None
-        if postprocessor is not None:
-            if isinstance(postprocessor, PostProcessorPipeline):
-                subset = postprocessor.exportable_subset()
-                export_pp = subset if len(subset) > 0 else None
-            elif postprocessor.exportable:
-                export_pp = postprocessor
-            else:
-                logger.warning(
-                    "Post-processor %s is not exportable and will be excluded from the ONNX graph.",
-                    type(postprocessor).__name__,
-                )
-        self.add_module("export_postprocessor", export_pp)
+        self.add_module("export_postprocessor", postprocessor)
 
         # Freeze reference features as model constants
         self.register_buffer("ref_embeddings", ref_features.ref_embeddings)
@@ -349,7 +344,6 @@ class Matcher(Model):
         Args:
             export_dir: Directory to save exported models.
             backend: Export backend (ONNX, OpenVINO).
-            **kwargs: Additional export parameters.
 
         Returns:
             Path to export directory.
@@ -367,8 +361,8 @@ class Matcher(Model):
 
         matcher = MatcherInferenceGraph(
             encoder=EncoderForwardFeaturesWrapper(
-                self.encoder._model.model,
-                ignore_token_length=self.encoder._model.ignore_token_length,
+                self.encoder._model.model,  # noqa: SLF001
+                ignore_token_length=self.encoder._model.ignore_token_length,  # noqa: SLF001
             ),
             prompt_generator=self.prompt_generator,
             sam_decoder=self.segmenter,
@@ -398,7 +392,7 @@ class Matcher(Model):
 
         if backend == Backend.OPENVINO:
             try:
-                import openvino
+                import openvino  # noqa: PLC0415
 
                 # Export to ONNX first, then convert to OpenVINO
                 # Direct PyTorch → OpenVINO conversion fails on many ops (aten::pad, aten::unbind, etc.)

@@ -5,22 +5,18 @@
 
 Post-processors are ``nn.Module`` subclasses that transform segmentation
 predictions (masks, scores, labels) in a composable, chainable way.
-Each post-processor declares whether it is safe for ONNX export via
-the ``exportable`` property, allowing the pipeline to automatically
-exclude non-traceable operations at export time.
+All post-processors use pure PyTorch operations and are ONNX/OpenVINO
+exportable.
 """
 
 from __future__ import annotations
 
-import logging
 from abc import abstractmethod
 
 import torch
 from torch import nn
 
 from instantlearn.components.sam.decoder import masks_to_boxes_traceable
-
-logger = logging.getLogger(__name__)
 
 
 class PostProcessor(nn.Module):
@@ -35,14 +31,9 @@ class PostProcessor(nn.Module):
         - scores: ``[N]`` float tensor
         - labels: ``[N]`` int64 tensor
 
-    The ``exportable`` property should be overridden to ``False`` for
-    processors that rely on non-traceable ops (e.g. OpenCV, SciPy).
+    All post-processors use pure PyTorch operations and are ONNX/OpenVINO
+    exportable.
     """
-
-    @property
-    def exportable(self) -> bool:
-        """Whether this processor uses only ONNX-traceable operations."""
-        return True
 
     @abstractmethod
     def forward(
@@ -89,31 +80,6 @@ class PostProcessorPipeline(PostProcessor):
         """Initialize the pipeline with an ordered list of processors."""
         super().__init__()
         self.processors = nn.ModuleList(processors)
-
-    @property
-    def exportable(self) -> bool:
-        """True only if every child processor is exportable."""
-        return all(p.exportable for p in self.processors)
-
-    def exportable_subset(self) -> PostProcessorPipeline:
-        """Return a new pipeline containing only ONNX-exportable processors.
-
-        Useful at export time to include only traceable post-processing
-        in the exported graph while keeping non-traceable ops for eager mode.
-
-        Returns:
-            A new ``PostProcessorPipeline`` with non-exportable processors removed.
-        """
-        exportable = [p for p in self.processors if p.exportable]
-        if len(exportable) < len(self.processors):
-            skipped = [type(p).__name__ for p in self.processors if not p.exportable]
-            logger.warning(
-                "Skipping non-exportable post-processors for ONNX export: %s",
-                ", ".join(skipped),
-            )
-        if not exportable:
-            logger.warning("All post-processors are non-exportable — exported model will have no post-processing.")
-        return PostProcessorPipeline(exportable)
 
     def __len__(self) -> int:
         """Return the number of processors in the pipeline."""
@@ -175,9 +141,7 @@ def apply_postprocessing(
         }
 
         # Only recompute boxes when masks were actually modified
-        masks_changed = (
-            new_masks.shape != orig_masks.shape or not torch.equal(new_masks, orig_masks)
-        )
+        masks_changed = new_masks.shape != orig_masks.shape or not torch.equal(new_masks, orig_masks)
 
         if masks_changed:
             if new_masks.numel() > 0 and new_masks.size(0) > 0:
