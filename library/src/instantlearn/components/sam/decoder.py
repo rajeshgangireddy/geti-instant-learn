@@ -79,7 +79,7 @@ class SamDecoder(nn.Module):
         self.use_mask_refinement = use_mask_refinement
         self.device = sam_predictor.device
 
-    def _preprocess_points(self, points: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _preprocess_points(self, points: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:  # noqa: PLR6301
         """Preprocess points for SAM predictor.
 
         Args:
@@ -163,7 +163,7 @@ class SamDecoder(nn.Module):
 
         return padded_masks, padded_scores, padded_labels
 
-    def _resize_similarity(
+    def _resize_similarity(  # noqa: PLR6301
         self,
         similarity: torch.Tensor,
         target_size: tuple[int, int],
@@ -341,7 +341,6 @@ class SamDecoder(nn.Module):
         Args:
             image: Input image [3, H, W]
             box_prompts: Box prompts [C, max_boxes, 5] with (x1, y1, x2, y2, score)
-            num_boxes: Number of valid boxes per category [C]
             category_ids: Category ID mapping [C]
 
         Returns:
@@ -439,9 +438,6 @@ class SamDecoder(nn.Module):
             box_prompts: Box prompts [T, C, max_boxes, 5] (optional)
             similarities: Similarity maps [T, C, feat_size, feat_size] (optional)
 
-        Raises:
-            ValueError: If both or neither of point_prompts and box_prompts are provided.
-
         Returns:
             List of predictions per image, each containing:
                 "pred_masks": [num_valid_masks, H, W]
@@ -449,6 +445,9 @@ class SamDecoder(nn.Module):
                 "pred_labels": [num_valid_masks]
                 "pred_points": [num_points_used, 4] (point mode only)
                 "pred_boxes": [num_boxes, 5] (box mode only)
+
+        Raises:
+            ValueError: If both or neither of point_prompts and box_prompts are provided.
         """
         use_points = point_prompts is not None
         use_boxes = box_prompts is not None

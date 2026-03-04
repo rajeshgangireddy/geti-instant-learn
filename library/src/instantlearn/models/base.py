@@ -6,15 +6,19 @@
 from __future__ import annotations
 
 from abc import abstractmethod
-from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
 
 from instantlearn.components.postprocessing.base import PostProcessor, apply_postprocessing
-from instantlearn.data.base.batch import Batch, Collatable
-from instantlearn.data.base.sample import Sample
 from instantlearn.utils.constants import Backend
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from instantlearn.data.base.batch import Batch, Collatable
+    from instantlearn.data.base.sample import Sample
 
 
 class Model(nn.Module):
@@ -84,7 +88,7 @@ class Model(nn.Module):
         self,
         export_dir: str | Path,
         backend: str | Backend = Backend.ONNX,
-        **kwargs,
+        **kwargs: Any,  # noqa: ANN401
     ) -> Path:
         """This method exports the model to a given path.
 
