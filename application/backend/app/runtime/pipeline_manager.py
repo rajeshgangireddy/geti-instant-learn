@@ -208,14 +208,24 @@ class PipelineManager:
                 # having two models in device memory simultaneously.
                 self._pipeline.stop_component(Processor)
 
-                reference_batch, category_id_to_label_id = self.get_reference_batch(project_id, PromptType.VISUAL) or (
-                    None,
-                    {},
-                )
-                processor = self._component_factory.create_processor(
-                    project_id, reference_batch, category_id_to_label_id
-                )
-                self._pipeline.set_processor(processor, True)
+                try:
+                    reference_batch, category_id_to_label_id = self.get_reference_batch(
+                        project_id, PromptType.VISUAL
+                    ) or (
+                        None,
+                        {},
+                    )
+                    processor = self._component_factory.create_processor(
+                        project_id, reference_batch, category_id_to_label_id
+                    )
+                    self._pipeline.set_processor(processor, True)
+                except Exception:
+                    logger.exception(
+                        "Failed to create replacement processor for project %s; stopping pipeline",
+                        project_id,
+                    )
+                    self._pipeline.stop()
+                    self._pipeline = None
             case ComponentType.SINK:
                 sink = self._component_factory.create_sink(project_id)
                 self._pipeline.set_sink(sink, True)

@@ -21,12 +21,15 @@ def release_device_memory(device: str) -> None:
     """Clear the device memory cache after model cleanup.
 
     Calls the appropriate cache-clearing function depending on the device
-    type (CUDA, XPU, or CPU). This should be called after deleting model
-    references and running ``gc.collect()`` to ensure freed tensors are
-    returned to the device allocator.
+    type (CUDA, XPU, or CPU). The device string may include an index
+    (e.g. ``"cuda:0"``); only the base type is used to select the cache
+    to clear. This should be called after deleting model references and
+    running ``gc.collect()`` to ensure freed tensors are returned to the
+    device allocator.
 
     Args:
-        device: The device string ("cpu", "cuda", "xpu").
+        device: The device string, e.g. ``"cpu"``, ``"cuda"``,
+            ``"cuda:0"``, or ``"xpu"``.
     """
     device_type = device.split(":")[0]
     if device_type == "cuda" and torch.cuda.is_available():

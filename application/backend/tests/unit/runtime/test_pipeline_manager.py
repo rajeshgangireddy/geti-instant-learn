@@ -329,6 +329,33 @@ class TestPipelineManager:
                 f"Expected stop_component before create_processor, got: {call_order}"
             )
 
+    def test_on_processor_update_stops_pipeline_on_creation_failure(
+        self, dispatcher, session_factory, mock_component_factory
+    ):
+        """If creating the replacement processor fails, the pipeline should be stopped cleanly."""
+        with (
+            patch("runtime.pipeline_manager.Pipeline"),
+            patch.object(PipelineManager, "get_reference_batch", return_value=None),
+            patch.object(PipelineManager, "_refresh_visualization_info", return_value=None),
+        ):
+            pid = uuid4()
+            component_id = uuid4()
+            running = Mock()
+            running.project_id = pid
+
+            mock_component_factory.create_processor.side_effect = RuntimeError("OOM")
+
+            mgr = PipelineManager(dispatcher, session_factory, component_factory=mock_component_factory)
+            mgr._pipeline = running
+
+            ev = ComponentConfigChangeEvent(
+                project_id=pid, component_type=ComponentType.PROCESSOR, component_id=component_id
+            )
+            mgr.on_config_change(ev)
+
+            running.stop.assert_called_once()
+            assert mgr._pipeline is None
+
     def test_on_component_update_ignores_mismatch(self, dispatcher, session_factory):
         with patch("runtime.pipeline_manager.Pipeline"):
             pid_running = uuid4()
