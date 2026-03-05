@@ -96,9 +96,17 @@ jobs:
         with:
           config: '.github/.markdownlint-cli2.jsonc'
 
+  documentation:
+    name: Documentation markdown checks
+    needs: build-parameters
+    permissions:
+      contents: read
+    if: needs.build-parameters.outputs.components-list && contains(fromJson(needs.build-parameters.outputs.components-list), 'documentation')
+    uses: ./.github/workflows/documentation.yml
+
   success:
     name: Status checks
-    needs: [ build-parameters, library, backend, ui, distrib, markdown ]
+    needs: [ build-parameters, library, backend, ui, distrib, markdown, documentation ]
     runs-on: ubuntu-latest
     if: ${{ always() && !cancelled() }}
     env:
