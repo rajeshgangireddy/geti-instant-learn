@@ -145,6 +145,11 @@ YOLOE_MODEL_NAMES = (
     "yoloe-11s-seg",
     "yoloe-11m-seg",
     "yoloe-11l-seg",
+    "yoloe-26n-seg",
+    "yoloe-26s-seg",
+    "yoloe-26m-seg",
+    "yoloe-26l-seg",
+    "yoloe-26x-seg",
 )
 
 

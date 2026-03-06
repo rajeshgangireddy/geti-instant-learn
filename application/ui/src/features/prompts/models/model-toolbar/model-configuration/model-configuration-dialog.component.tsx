@@ -60,7 +60,18 @@ const PRECISIONS: { label: string; value: Precision }[] = [
     { label: 'BF16', value: 'bf16' },
 ];
 
-type YoloeModelName = 'yoloe-v8s-seg' | 'yoloe-v8m-seg' | 'yoloe-v8l-seg' | 'yoloe-11s-seg' | 'yoloe-11m-seg' | 'yoloe-11l-seg';
+type YoloeModelName =
+    | 'yoloe-v8s-seg'
+    | 'yoloe-v8m-seg'
+    | 'yoloe-v8l-seg'
+    | 'yoloe-11s-seg'
+    | 'yoloe-11m-seg'
+    | 'yoloe-11l-seg'
+    | 'yoloe-26n-seg'
+    | 'yoloe-26s-seg'
+    | 'yoloe-26m-seg'
+    | 'yoloe-26l-seg'
+    | 'yoloe-26x-seg';
 
 const YOLOE_MODELS: { label: string; value: YoloeModelName }[] = [
     { label: 'YOLOE v8 Small', value: 'yoloe-v8s-seg' },
@@ -69,6 +80,11 @@ const YOLOE_MODELS: { label: string; value: YoloeModelName }[] = [
     { label: 'YOLOE 11 Small', value: 'yoloe-11s-seg' },
     { label: 'YOLOE 11 Medium', value: 'yoloe-11m-seg' },
     { label: 'YOLOE 11 Large', value: 'yoloe-11l-seg' },
+    { label: 'YOLOE 26 Nano', value: 'yoloe-26n-seg' },
+    { label: 'YOLOE 26 Small', value: 'yoloe-26s-seg' },
+    { label: 'YOLOE 26 Medium', value: 'yoloe-26m-seg' },
+    { label: 'YOLOE 26 Large', value: 'yoloe-26l-seg' },
+    { label: 'YOLOE 26 XLarge', value: 'yoloe-26x-seg' },
 ];
 
 interface SelectionProps<T extends string> {

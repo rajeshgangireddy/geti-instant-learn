@@ -36,6 +36,11 @@ YOLOE_MODELS: dict[str, str] = {
     "yoloe-11s-seg": "yoloe-11s-seg.pt",
     "yoloe-11m-seg": "yoloe-11m-seg.pt",
     "yoloe-11l-seg": "yoloe-11l-seg.pt",
+    "yoloe-26n-seg": "yoloe-26n-seg.pt",
+    "yoloe-26s-seg": "yoloe-26s-seg.pt",
+    "yoloe-26m-seg": "yoloe-26m-seg.pt",
+    "yoloe-26l-seg": "yoloe-26l-seg.pt",
+    "yoloe-26x-seg": "yoloe-26x-seg.pt",
 }
 
 
