@@ -5,7 +5,7 @@
 
 import { useEffect, useRef } from 'react';
 
-import { $api, MatcherModel, ModelListType, PerDINOModel, SoftMatcherModel } from '@/api';
+import { $api, MatcherModel, ModelListType, PerDINOModel, SoftMatcherModel, YoloeModel } from '@/api';
 import { useProjectIdentifier } from '@/hooks';
 import { v4 as uuid } from 'uuid';
 
@@ -89,6 +89,23 @@ const getDefaultSoftMatcherModel = (id: string): SoftMatcherModel => {
     };
 };
 
+const getDefaultYoloeModel = (id: string): YoloeModel => {
+    return {
+        id,
+        config: {
+            model_type: 'yoloe',
+            model_name: 'yoloe-v8s-seg',
+            confidence_threshold: 0.25,
+            iou_threshold: 0.7,
+            imgsz: 640,
+            use_nms: true,
+            precision: 'fp16',
+        },
+        active: false,
+        name: 'YOLOE',
+    };
+};
+
 export const useGetModels = () => {
     const { models } = useGetModelsQuery();
     const createModel = useCreateModel();
@@ -102,6 +119,7 @@ export const useGetModels = () => {
             createModel(getDefaultPerDINOModel(uuid()));
             createModel(getDefaultSoftMatcherModel(uuid()));
             createModel(getDefaultMatcherModel(uuid()));
+            createModel(getDefaultYoloeModel(uuid()));
         }
     }, [models.length, createModel]);
 

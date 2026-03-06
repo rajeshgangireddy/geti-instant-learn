@@ -14,6 +14,7 @@ from .matcher import Matcher
 from .per_dino import PerDino
 from .sam3 import SAM3
 from .soft_matcher import SoftMatcher
+from .yoloe import YOLOE
 
 __all__ = [
     "SAM3",
@@ -23,4 +24,5 @@ __all__ = [
     "Model",
     "PerDino",
     "SoftMatcher",
+    "YOLOE",
 ]

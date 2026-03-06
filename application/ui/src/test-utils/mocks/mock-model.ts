@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ModelType } from '@/api';
+import type { ModelType, YoloeModel } from '@/api';
 
 export const getMockedModel = (model?: Partial<ModelType>): ModelType => {
     return {
@@ -23,6 +23,24 @@ export const getMockedModel = (model?: Partial<ModelType>): ModelType => {
         },
         active: true,
         name: 'PerDINO',
+        ...model,
+    };
+};
+
+export const getMockedYoloeModel = (model?: Partial<YoloeModel>): YoloeModel => {
+    return {
+        id: 'yoloe-id',
+        config: {
+            model_type: 'yoloe',
+            model_name: 'yoloe-v8s-seg',
+            confidence_threshold: 0.25,
+            iou_threshold: 0.7,
+            imgsz: 640,
+            use_nms: true,
+            precision: 'fp16',
+        },
+        active: false,
+        name: 'YOLOE',
         ...model,
     };
 };

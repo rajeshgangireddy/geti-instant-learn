@@ -5,12 +5,12 @@
 
 import { FormEvent, useState } from 'react';
 
-import { MatcherModel, ModelType, PerDINOModel, SoftMatcherModel } from '@/api';
+import { MatcherModel, ModelType, PerDINOModel, SoftMatcherModel, YoloeModel } from '@/api';
 import { Button, ButtonGroup, Content, Dialog, Divider, Flex, Form, Heading, Item, Picker, Switch } from '@geti/ui';
 
 import { useUpdateModel } from '../../api/use-update-model';
 import { NumberField } from './number-field.component';
-import { isMatcherModel, isPerDINOModel, isSoftMatcherModel } from './utils';
+import { isMatcherModel, isPerDINOModel, isSoftMatcherModel, isYoloeModel } from './utils';
 
 const ENCODER_MODELS = [
     { label: 'DINOv3 Small', value: 'dinov3_small' },
@@ -58,6 +58,17 @@ const PRECISIONS: { label: string; value: Precision }[] = [
     { label: 'FP16', value: 'fp16' },
     { label: 'FP32', value: 'fp32' },
     { label: 'BF16', value: 'bf16' },
+];
+
+type YoloeModelName = 'yoloe-v8s-seg' | 'yoloe-v8m-seg' | 'yoloe-v8l-seg' | 'yoloe-11s-seg' | 'yoloe-11m-seg' | 'yoloe-11l-seg';
+
+const YOLOE_MODELS: { label: string; value: YoloeModelName }[] = [
+    { label: 'YOLOE v8 Small', value: 'yoloe-v8s-seg' },
+    { label: 'YOLOE v8 Medium', value: 'yoloe-v8m-seg' },
+    { label: 'YOLOE v8 Large', value: 'yoloe-v8l-seg' },
+    { label: 'YOLOE 11 Small', value: 'yoloe-11s-seg' },
+    { label: 'YOLOE 11 Medium', value: 'yoloe-11m-seg' },
+    { label: 'YOLOE 11 Large', value: 'yoloe-11l-seg' },
 ];
 
 interface SelectionProps<T extends string> {
@@ -518,6 +529,108 @@ interface ModelConfigurationDialogProps {
     onClose: () => void;
 }
 
+interface YoloeConfigurationProps {
+    model: YoloeModel;
+    onClose: () => void;
+}
+
+const YoloeConfiguration = ({ model, onClose }: YoloeConfigurationProps) => {
+    const [modelName, setModelName] = useState<YoloeModelName>(model.config.model_name as YoloeModelName);
+    const [confidenceThreshold, setConfidenceThreshold] = useState<number>(model.config.confidence_threshold);
+    const [iouThreshold, setIouThreshold] = useState<number>(model.config.iou_threshold);
+    const [imgsz, setImgsz] = useState<number>(model.config.imgsz);
+    const [precision, setPrecision] = useState<Precision>(model.config.precision as Precision);
+    const [useNMS, setUseNMS] = useState<boolean>(model.config.use_nms);
+
+    const updateModelMutation = useUpdateModel();
+
+    const isConfigureButtonDisabled =
+        modelName === model.config.model_name &&
+        confidenceThreshold === model.config.confidence_threshold &&
+        iouThreshold === model.config.iou_threshold &&
+        imgsz === model.config.imgsz &&
+        precision === model.config.precision &&
+        useNMS === model.config.use_nms;
+
+    const updateModel = (event: FormEvent) => {
+        event.preventDefault();
+
+        updateModelMutation.mutate(
+            {
+                active: model.active,
+                name: model.name,
+                id: model.id,
+                config: {
+                    model_type: model.config.model_type,
+                    model_name: modelName,
+                    confidence_threshold: confidenceThreshold,
+                    iou_threshold: iouThreshold,
+                    imgsz,
+                    use_nms: useNMS,
+                    precision,
+                },
+            },
+            onClose
+        );
+    };
+
+    return (
+        <Form onSubmit={updateModel}>
+            <Flex direction={'column'} gap={'size-200'}>
+                <Selection
+                    label={'Model variant'}
+                    items={YOLOE_MODELS}
+                    value={modelName}
+                    onChange={setModelName}
+                />
+                <NumberField
+                    label={'Confidence threshold'}
+                    minValue={0}
+                    maxValue={1}
+                    step={0.01}
+                    onChange={setConfidenceThreshold}
+                    value={confidenceThreshold}
+                />
+                <NumberField
+                    label={'IoU threshold'}
+                    minValue={0}
+                    maxValue={1}
+                    step={0.01}
+                    onChange={setIouThreshold}
+                    value={iouThreshold}
+                />
+                <NumberField
+                    label={'Image size'}
+                    minValue={320}
+                    maxValue={1280}
+                    step={32}
+                    onChange={setImgsz}
+                    value={imgsz}
+                />
+                <Selection label={'Precision'} value={precision} onChange={setPrecision} items={PRECISIONS} />
+                <Flex alignItems={'center'} width={'100%'} wrap={'wrap'}>
+                    <Switch isEmphasized isSelected={useNMS} onChange={setUseNMS}>
+                        Merge overlapping results
+                    </Switch>
+                </Flex>
+                <ButtonGroup align={'end'}>
+                    <Button variant={'secondary'} onPress={onClose}>
+                        Cancel
+                    </Button>
+                    <Button
+                        type={'submit'}
+                        variant={'primary'}
+                        isPending={updateModelMutation.isPending}
+                        isDisabled={isConfigureButtonDisabled}
+                    >
+                        Configure
+                    </Button>
+                </ButtonGroup>
+            </Flex>
+        </Form>
+    );
+};
+
 export const ModelConfigurationDialog = ({ model, onClose }: ModelConfigurationDialogProps) => {
     return (
         <Dialog width={'40vw'}>
@@ -530,6 +643,8 @@ export const ModelConfigurationDialog = ({ model, onClose }: ModelConfigurationD
                     <PerDINOConfiguration model={model} onClose={onClose} />
                 ) : isSoftMatcherModel(model) ? (
                     <SoftMatcherConfiguration model={model} onClose={onClose} />
+                ) : isYoloeModel(model) ? (
+                    <YoloeConfiguration model={model} onClose={onClose} />
                 ) : null}
             </Content>
         </Dialog>

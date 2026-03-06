@@ -1,7 +1,7 @@
 # Copyright (C) 2025-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for models including PerDino, Matcher, SoftMatcher, and GroundedSAM."""
+"""Unit tests for models including PerDino, Matcher, SoftMatcher, GroundedSAM, and YOLOE."""
 
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -14,6 +14,7 @@ from instantlearn.models.grounded_sam import GroundedSAM
 from instantlearn.models.matcher import Matcher
 from instantlearn.models.per_dino import PerDino
 from instantlearn.models.soft_matcher import SoftMatcher
+from instantlearn.models.yoloe import YOLOE
 
 
 class TestPerDino:
@@ -438,4 +439,93 @@ class TestGroundedSAM:
         model.predict(target_images)
 
         # Verify that predict was called
+        model.predict.assert_called_once_with(target_images)
+
+
+class TestYOLOE:
+    """Test YOLOE model."""
+
+    @patch("ultralytics.YOLO")
+    def test_yoloe_initialization(self, mock_yolo_cls: MagicMock) -> None:
+        """Test YOLOE initialization."""
+        mock_yolo_cls.return_value = MagicMock()
+
+        model = YOLOE(model_name="yoloe-v8s-seg", device="cpu")
+
+        assert model.model_name == "yoloe-v8s-seg"
+        assert model.confidence_threshold == 0.25
+        assert model.iou_threshold == 0.7
+        assert model.imgsz == 640
+        assert model.use_nms is True
+        assert model.precision == "fp16"
+        mock_yolo_cls.assert_called_once()
+
+    def test_yoloe_invalid_model_name(self) -> None:
+        """Test YOLOE raises ValueError for unknown model name."""
+        with pytest.raises(ValueError, match="Unknown YOLOE model"):
+            YOLOE(model_name="yoloe-invalid", device="cpu")
+
+    @patch("ultralytics.YOLO")
+    def test_yoloe_fit_sets_visual_prompts(self, mock_yolo_cls: MagicMock) -> None:
+        """Test that fit() sets visual prompts on the model."""
+        mock_yolo_instance = MagicMock()
+        mock_yolo_cls.return_value = mock_yolo_instance
+
+        model = YOLOE(model_name="yoloe-v8s-seg", device="cpu")
+
+        # Create a mock reference sample
+        ref_image = torch.randint(0, 255, (3, 100, 100), dtype=torch.uint8)
+        ref_mask = torch.zeros(100, 100, dtype=torch.bool)
+        ref_mask[20:50, 30:60] = True
+
+        with patch("instantlearn.models.yoloe.yoloe.Batch") as mock_batch_cls:
+            mock_batch = MagicMock()
+            mock_batch.images = [ref_image]
+            mock_batch.masks = [ref_mask.unsqueeze(0)]
+            mock_batch.category_ids = [1]
+            mock_batch_cls.collate.return_value = mock_batch
+
+            model.fit(MagicMock())
+
+        mock_yolo_instance.set_visual_prompts.assert_called_once()
+        assert model._visual_prompts_set is True
+
+    @patch("ultralytics.YOLO")
+    def test_yoloe_predict_raises_without_fit(self, mock_yolo_cls: MagicMock) -> None:
+        """Test that predict() raises RuntimeError if fit() was not called."""
+        mock_yolo_cls.return_value = MagicMock()
+
+        model = YOLOE(model_name="yoloe-v8s-seg", device="cpu")
+
+        with pytest.raises(RuntimeError, match="No visual prompts set"):
+            model.predict([Image(torch.zeros((3, 224, 224), dtype=torch.uint8))])
+
+    @patch("ultralytics.YOLO")
+    def test_yoloe_forward_pass(self, mock_yolo_cls: MagicMock) -> None:
+        """Test YOLOE forward pass with mocked methods."""
+        mock_yolo_cls.return_value = MagicMock()
+
+        model = YOLOE(model_name="yoloe-v8s-seg", device="cpu")
+
+        model.fit = MagicMock(return_value=None)
+        model.predict = MagicMock(
+            return_value=[
+                {
+                    "pred_masks": torch.zeros((0, 224, 224), dtype=torch.bool),
+                    "pred_boxes": torch.zeros((0, 5), dtype=torch.float32),
+                    "pred_labels": torch.zeros((0,), dtype=torch.long),
+                },
+            ],
+        )
+
+        target_images = [Image(torch.zeros((3, 224, 224), dtype=torch.uint8))]
+
+        predictions = model.predict(target_images)
+
+        assert isinstance(predictions, list)
+        assert len(predictions) == 1
+        assert isinstance(predictions[0], dict)
+        assert "pred_masks" in predictions[0]
+        assert "pred_boxes" in predictions[0]
+        assert "pred_labels" in predictions[0]
         model.predict.assert_called_once_with(target_images)

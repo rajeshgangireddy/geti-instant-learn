@@ -18,6 +18,7 @@ class ModelType(StrEnum):
     MATCHER = "matcher"
     PERDINO = "perdino"
     SOFT_MATCHER = "soft_matcher"
+    YOLOE = "yoloe"
 
 
 ALLOWED_SAM_MODELS: tuple[SAMModelName, ...] = (
@@ -137,7 +138,57 @@ class SoftMatcherConfig(BaseModelConfig):
     }
 
 
-ModelConfig = Annotated[PerDinoConfig | MatcherConfig | SoftMatcherConfig, Field(discriminator="model_type")]
+YOLOE_MODEL_NAMES = (
+    "yoloe-v8s-seg",
+    "yoloe-v8m-seg",
+    "yoloe-v8l-seg",
+    "yoloe-11s-seg",
+    "yoloe-11m-seg",
+    "yoloe-11l-seg",
+)
+
+
+class YoloeConfig(BaseModel):
+    """Configuration for YOLOE model.
+
+    YOLOE is an end-to-end detection/segmentation model that does not
+    require a separate encoder or SAM decoder pipeline.
+    """
+
+    model_type: Literal[ModelType.YOLOE] = ModelType.YOLOE
+    model_name: str = Field(default="yoloe-v8s-seg", description="YOLOE model variant")
+    confidence_threshold: float = Field(default=0.25, gt=0.0, lt=1.0)
+    iou_threshold: float = Field(default=0.7, gt=0.0, lt=1.0)
+    imgsz: int = Field(default=640, gt=0, description="Input image size")
+    use_nms: bool = Field(default=True)
+    precision: str = Field(default="fp16", description="Model precision")
+
+    @field_validator("model_name")
+    @classmethod
+    def validate_model_name(cls, v: str) -> str:
+        if v not in YOLOE_MODEL_NAMES:
+            raise ValueError(f"Supported YOLOE model must be one of {list(YOLOE_MODEL_NAMES)}, got '{v}'")
+        return v
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "model_type": "yoloe",
+                "model_name": "yoloe-v8s-seg",
+                "confidence_threshold": 0.25,
+                "iou_threshold": 0.7,
+                "imgsz": 640,
+                "use_nms": True,
+                "precision": "fp16",
+            }
+        }
+    }
+
+
+ModelConfig = Annotated[
+    PerDinoConfig | MatcherConfig | SoftMatcherConfig | YoloeConfig,
+    Field(discriminator="model_type"),
+]
 
 
 @dataclass(kw_only=True)

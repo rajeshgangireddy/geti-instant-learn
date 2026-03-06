@@ -4,7 +4,7 @@
  */
 
 import { ModelType, ModelUpdateType } from '@/api';
-import { getMockedModel, render } from '@/test-utils';
+import { getMockedModel, getMockedYoloeModel, render } from '@/test-utils';
 import { fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { HttpResponse } from 'msw';
@@ -196,5 +196,22 @@ describe('ModelConfigurationDialog', () => {
         await modelConfigurationDialogPage.closeDialog();
 
         expect(onClose).toHaveBeenCalled();
+    });
+
+    it('renders YOLOE configuration fields', () => {
+        const model = getMockedYoloeModel();
+        renderModelConfigurationDialog({ model });
+
+        expect(screen.getByRole('button', { name: /Model variant/i })).toBeInTheDocument();
+        expect(screen.getByRole('textbox', { name: 'Confidence threshold' })).toBeInTheDocument();
+        expect(screen.getByRole('textbox', { name: 'IoU threshold' })).toBeInTheDocument();
+        expect(screen.getByRole('textbox', { name: 'Image size' })).toBeInTheDocument();
+    });
+
+    it('disables configure button when YOLOE parameters have not been changed', () => {
+        const model = getMockedYoloeModel();
+        const { modelConfigurationDialogPage } = renderModelConfigurationDialog({ model });
+
+        expect(modelConfigurationDialogPage.configureButton).toBeDisabled();
     });
 });

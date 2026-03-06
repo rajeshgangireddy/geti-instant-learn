@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from instantlearn.utils.constants import SAMModelName
 
-from domain.services.schemas.processor import MatcherConfig, PerDinoConfig, SoftMatcherConfig
+from domain.services.schemas.processor import MatcherConfig, PerDinoConfig, SoftMatcherConfig, YoloeConfig
 from runtime.core.components.factories.model import ModelFactory
 from runtime.core.components.models.passthrough_model import PassThroughModelHandler
 
@@ -138,6 +138,35 @@ class TestModelFactory:
                     )
                     mock_handler.assert_called_once_with(mock_model_instance, mock_reference_batch)
 
+    def test_factory_creates_yoloe_model_with_config(self, mock_reference_batch, mock_settings):
+        config = YoloeConfig(
+            model_name="yoloe-v8s-seg",
+            confidence_threshold=0.25,
+            iou_threshold=0.7,
+            imgsz=640,
+            use_nms=True,
+            precision="fp16",
+        )
+
+        with patch("runtime.core.components.factories.model.get_settings", return_value=mock_settings):
+            with patch("runtime.core.components.factories.model.YOLOE") as mock_yoloe:
+                with patch("runtime.core.components.factories.model.InferenceModelHandler") as mock_handler:
+                    mock_model_instance = MagicMock()
+                    mock_yoloe.return_value = mock_model_instance
+
+                    ModelFactory.create(mock_reference_batch, config)
+
+                    mock_yoloe.assert_called_once_with(
+                        model_name="yoloe-v8s-seg",
+                        confidence_threshold=0.25,
+                        iou_threshold=0.7,
+                        imgsz=640,
+                        use_nms=True,
+                        precision="fp16",
+                        device="cpu",
+                    )
+                    mock_handler.assert_called_once_with(mock_model_instance, mock_reference_batch)
+
     def test_factory_returns_passthrough_for_none_reference_batch(self):
         config = MatcherConfig(
             num_foreground_points=5,
@@ -190,6 +219,7 @@ class TestModelFactory:
             (MatcherConfig, "Matcher"),
             (PerDinoConfig, "PerDino"),
             (SoftMatcherConfig, "SoftMatcher"),
+            (YoloeConfig, "YOLOE"),
         ],
     )
     def test_factory_returns_inference_handler_for_valid_configs(
@@ -209,6 +239,13 @@ class TestModelFactory:
                 num_background_points=2,
                 sam_model=SAMModelName.SAM_HQ_TINY,
                 encoder_model="dinov3_large",
+            )
+        elif config_class == YoloeConfig:
+            config = YoloeConfig(
+                model_name="yoloe-v8s-seg",
+                confidence_threshold=0.25,
+                iou_threshold=0.7,
+                imgsz=640,
             )
         else:
             config = SoftMatcherConfig(
