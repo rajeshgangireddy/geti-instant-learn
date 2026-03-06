@@ -25,6 +25,7 @@ from instantlearn.utils.constants import Backend
 if TYPE_CHECKING:
     from ultralytics import YOLO as UltralyticsYOLO
     from ultralytics.engine.results import Results as UltralyticsResults
+    from ultralytics.engine.predictor import BasePredictor
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,7 @@ class YOLOE(Model):
         self.device_name = device
 
         self._model = self._load_model()
+        self._predictor_cls = self._get_predictor_cls()
         self._visual_prompts_set = False
 
     def _load_model(self) -> UltralyticsYOLO:
@@ -132,6 +134,24 @@ class YOLOE(Model):
         model = YOLO(model_path)
 
         return model
+
+    def _get_predictor_cls(self) -> type[BasePredictor]:
+        """Return the correct YOLOE visual-prompt predictor class.
+
+        Uses ``YOLOEVPSegPredictor`` for segmentation model variants
+        and ``YOLOEVPDetectPredictor`` for detection-only variants.
+
+        Returns:
+            Predictor class appropriate for the loaded model.
+        """
+        from ultralytics.models.yolo.yoloe.predict import (
+            YOLOEVPDetectPredictor,
+            YOLOEVPSegPredictor,
+        )
+
+        if "seg" in self.model_name:
+            return YOLOEVPSegPredictor
+        return YOLOEVPDetectPredictor
 
     @staticmethod
     def _image_to_numpy(image: torch.Tensor) -> np.ndarray:
@@ -264,10 +284,10 @@ class YOLOE(Model):
                 source=img_np,
                 visual_prompts=self._visual_prompts,
                 refer_image=self._refer_image,
+                predictor=self._predictor_cls,
                 conf=self.confidence_threshold,
                 iou=self.iou_threshold,
                 imgsz=self.imgsz,
-                agnostic_nms=not self.use_nms,
                 verbose=False,
             )
 
