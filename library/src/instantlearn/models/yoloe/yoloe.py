@@ -133,63 +133,79 @@ class YOLOE(Model):
 
         return model
 
+    @staticmethod
+    def _image_to_numpy(image: torch.Tensor) -> np.ndarray:
+        """Convert a CHW torch image tensor to an HWC uint8 numpy array.
+
+        Args:
+            image: Image tensor of shape [3, H, W].
+
+        Returns:
+            Numpy array of shape [H, W, 3] with dtype uint8.
+        """
+        img_np = image.permute(1, 2, 0).cpu().numpy()
+        if img_np.dtype != np.uint8:
+            img_np = (
+                (img_np * 255).astype(np.uint8)
+                if img_np.max() <= 1.0
+                else img_np.astype(np.uint8)
+            )
+        return img_np
+
     def _prepare_visual_prompts(
         self,
         images: list[torch.Tensor],
-        masks: list[torch.Tensor],
-        category_ids: np.ndarray,
+        masks: list[torch.Tensor | None],
+        categories: list[list[str]],
     ) -> None:
-        """Prepare visual prompts from reference data.
+        """Prepare and store visual prompts from reference data.
+
+        Extracts bounding boxes from masks and builds the
+        ``visual_prompts`` dict expected by the ultralytics YOLOE
+        ``predict()`` API.  Only the **first** reference image is
+        used as ``refer_image`` (ultralytics limitation).
 
         Args:
-            images: List of reference images [3, H, W].
-            masks: List of reference masks [N, H, W].
-            category_ids: Category IDs for each mask.
+            images: Reference images, each of shape [3, H, W].
+            masks: Reference masks, each of shape [N, H, W] (or None).
+            categories: Category name lists aligned with masks.
         """
-        # Convert masks to bounding boxes for visual prompting
-        bboxes = []
-        classes = []
-        ref_images = []
+        all_bboxes: list[list[float]] = []
+        all_cls: list[str] = []
 
-        for image, mask_set, cat_ids in zip(images, masks, category_ids):
-            img_np = image.permute(1, 2, 0).cpu().numpy()
-            if img_np.dtype != np.uint8:
-                img_np = (img_np * 255).astype(np.uint8) if img_np.max() <= 1.0 else img_np.astype(np.uint8)
-            ref_images.append(img_np)
-
-            img_bboxes = []
-            img_classes = []
+        for mask_set, cats in zip(masks, categories):
+            if mask_set is None:
+                continue
 
             if mask_set.dim() == 2:
                 mask_set = mask_set.unsqueeze(0)
 
-            cat_ids_arr = np.atleast_1d(cat_ids) if not isinstance(cat_ids, np.ndarray) else cat_ids
-
-            for mask, cat_id in zip(mask_set, cat_ids_arr):
+            for mask, cat_name in zip(mask_set, cats):
                 ys, xs = torch.where(mask > 0)
                 if len(ys) == 0:
                     continue
                 x1, y1 = xs.min().item(), ys.min().item()
                 x2, y2 = xs.max().item(), ys.max().item()
-                img_bboxes.append([x1, y1, x2, y2])
-                img_classes.append(int(cat_id))
+                all_bboxes.append([x1, y1, x2, y2])
+                all_cls.append(cat_name)
 
-            if img_bboxes:
-                bboxes.append(img_bboxes)
-                classes.append(img_classes)
+        if not all_bboxes:
+            logger.warning("No valid bounding boxes extracted from reference masks.")
+            return
 
-        if ref_images and bboxes:
-            self._model.set_visual_prompts(
-                images=ref_images,
-                bboxes=bboxes,
-                classes=classes,
-            )
-            self._visual_prompts_set = True
-            logger.info(
-                "Visual prompts set with %d reference image(s) and %d total bounding box(es)",
-                len(ref_images),
-                sum(len(b) for b in bboxes),
-            )
+        # Store for use in predict()
+        self._refer_image = self._image_to_numpy(images[0])
+        self._visual_prompts: dict[str, list] = {
+            "bboxes": all_bboxes,
+            "cls": all_cls,
+        }
+        self._visual_prompts_set = True
+
+        logger.info(
+            "Visual prompts prepared with %d bounding box(es) from %d reference image(s)",
+            len(all_bboxes),
+            len(images),
+        )
 
     def fit(self, reference: Sample | list[Sample] | Batch) -> None:
         """Learn from reference images by setting visual prompts.
@@ -205,7 +221,7 @@ class YOLOE(Model):
         self._prepare_visual_prompts(
             images=reference_batch.images,
             masks=reference_batch.masks,
-            category_ids=reference_batch.category_ids,
+            categories=reference_batch.categories,
         )
 
     def predict(self, target: Collatable) -> list[dict[str, torch.Tensor]]:
@@ -236,12 +252,12 @@ class YOLOE(Model):
         all_results = []
 
         for image in target_batch.images:
-            img_np = image.permute(1, 2, 0).cpu().numpy()
-            if img_np.dtype != np.uint8:
-                img_np = (img_np * 255).astype(np.uint8) if img_np.max() <= 1.0 else img_np.astype(np.uint8)
+            img_np = self._image_to_numpy(image)
 
             results = self._model.predict(
                 source=img_np,
+                visual_prompts=self._visual_prompts,
+                refer_image=self._refer_image,
                 conf=self.confidence_threshold,
                 iou=self.iou_threshold,
                 imgsz=self.imgsz,

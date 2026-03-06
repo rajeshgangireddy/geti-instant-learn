@@ -467,7 +467,7 @@ class TestYOLOE:
 
     @patch("ultralytics.YOLO")
     def test_yoloe_fit_sets_visual_prompts(self, mock_yolo_cls: MagicMock) -> None:
-        """Test that fit() sets visual prompts on the model."""
+        """Test that fit() stores visual prompts and reference image."""
         mock_yolo_instance = MagicMock()
         mock_yolo_cls.return_value = mock_yolo_instance
 
@@ -482,13 +482,15 @@ class TestYOLOE:
             mock_batch = MagicMock()
             mock_batch.images = [ref_image]
             mock_batch.masks = [ref_mask.unsqueeze(0)]
-            mock_batch.category_ids = [1]
+            mock_batch.categories = [["object"]]
             mock_batch_cls.collate.return_value = mock_batch
 
             model.fit(MagicMock())
 
-        mock_yolo_instance.set_visual_prompts.assert_called_once()
         assert model._visual_prompts_set is True
+        assert model._refer_image is not None
+        assert model._visual_prompts["bboxes"] == [[30, 20, 59, 49]]
+        assert model._visual_prompts["cls"] == ["object"]
 
     @patch("ultralytics.YOLO")
     def test_yoloe_predict_raises_without_fit(self, mock_yolo_cls: MagicMock) -> None:
