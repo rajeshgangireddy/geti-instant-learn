@@ -156,7 +156,7 @@ class YOLOE(Model):
         self,
         images: list[torch.Tensor],
         masks: list[torch.Tensor | None],
-        categories: list[list[str]],
+        category_ids: list[torch.Tensor],
     ) -> None:
         """Prepare and store visual prompts from reference data.
 
@@ -168,26 +168,32 @@ class YOLOE(Model):
         Args:
             images: Reference images, each of shape [3, H, W].
             masks: Reference masks, each of shape [N, H, W] (or None).
-            categories: Category name lists aligned with masks.
+            category_ids: Integer category ID tensors aligned with masks.
         """
         all_bboxes: list[list[float]] = []
-        all_cls: list[str] = []
+        all_cls: list[int] = []
 
-        for mask_set, cats in zip(masks, categories):
+        for mask_set, cat_ids in zip(masks, category_ids):
             if mask_set is None:
                 continue
 
             if mask_set.dim() == 2:
                 mask_set = mask_set.unsqueeze(0)
 
-            for mask, cat_name in zip(mask_set, cats):
+            cat_ids_tensor = (
+                torch.atleast_1d(cat_ids)
+                if isinstance(cat_ids, torch.Tensor)
+                else torch.atleast_1d(torch.tensor(cat_ids))
+            )
+
+            for mask, cat_id in zip(mask_set, cat_ids_tensor):
                 ys, xs = torch.where(mask > 0)
                 if len(ys) == 0:
                     continue
                 x1, y1 = xs.min().item(), ys.min().item()
                 x2, y2 = xs.max().item(), ys.max().item()
                 all_bboxes.append([x1, y1, x2, y2])
-                all_cls.append(cat_name)
+                all_cls.append(int(cat_id.item()))
 
         if not all_bboxes:
             logger.warning("No valid bounding boxes extracted from reference masks.")
@@ -221,7 +227,7 @@ class YOLOE(Model):
         self._prepare_visual_prompts(
             images=reference_batch.images,
             masks=reference_batch.masks,
-            categories=reference_batch.categories,
+            category_ids=reference_batch.category_ids,
         )
 
     def predict(self, target: Collatable) -> list[dict[str, torch.Tensor]]:
