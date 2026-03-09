@@ -86,6 +86,26 @@ def _make_compiled_model(result_factory: Callable[[], MagicMock]) -> MagicMock:
     """Create a mock ov.CompiledModel that returns results from a factory."""
     model = MagicMock()
     model.side_effect = lambda _inputs: result_factory()
+
+    # Mock create_infer_request() for the InferRequest-based runner path
+    def _create_infer_request() -> MagicMock:
+        request = MagicMock()
+        result_holder: list[MagicMock] = []
+
+        def _infer(_inputs: list) -> None:
+            result_holder.clear()
+            result_holder.append(result_factory())
+
+        def _get_tensor(name: str) -> MagicMock:
+            tensor_mock = MagicMock()
+            tensor_mock.data = result_holder[0][name]
+            return tensor_mock
+
+        request.infer = MagicMock(side_effect=_infer)
+        request.get_tensor = MagicMock(side_effect=_get_tensor)
+        return request
+
+    model.create_infer_request = _create_infer_request
     return model
 
 

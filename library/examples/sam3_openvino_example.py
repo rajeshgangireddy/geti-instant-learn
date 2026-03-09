@@ -15,17 +15,20 @@ from the project README and SAM3 notebook. It covers:
     7. Visual exemplar mode — few-shot detection from reference images (v3 models)
 
 Usage:
+    # Auto-download default variant (FP16) from HuggingFace
+    python examples/sam3_openvino_example.py
+
+    # Auto-download INT8 quantised variant
+    python examples/sam3_openvino_example.py --variant INT8
+
     # Using local OpenVINO model directory
     python examples/sam3_openvino_example.py --model-dir ./sam3-openvino/openvino-fp16
 
-    # Download from HuggingFace Hub
-    python examples/sam3_openvino_example.py --repo-id rajeshgangireddy/exported_sam3
-
     # With visualization saved to disk
-    python examples/sam3_openvino_example.py --model-dir ./sam3-openvino/openvino-fp16 --save-viz
+    python examples/sam3_openvino_example.py --save-viz
 
     # Run only specific examples
-    python examples/sam3_openvino_example.py --model-dir ./sam3-openvino --examples 5,7
+    python examples/sam3_openvino_example.py --examples 5,7
 """
 
 from __future__ import annotations
@@ -38,12 +41,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-from huggingface_hub import snapshot_download
 
 from instantlearn.data import Sample
 from instantlearn.data.utils import read_image
 from instantlearn.models import SAM3OpenVINO
-from instantlearn.models.sam3 import Sam3PromptMode
+from instantlearn.models.sam3 import SAM3OVVariant, Sam3PromptMode
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s", force=True)
 logger = logging.getLogger(__name__)
@@ -54,35 +56,6 @@ IMAGE_ELEPHANT_1 = COCO_ASSETS / "000000286874.jpg"  # Elephant
 IMAGE_ELEPHANT_2 = COCO_ASSETS / "000000173279.jpg"  # Elephant herd
 IMAGE_ELEPHANT_3 = COCO_ASSETS / "000000390341.jpg"  # Elephant
 IMAGE_ELEPHANT_4 = COCO_ASSETS / "000000267704.jpg"  # Elephant with person
-
-
-def resolve_model_dir(args: argparse.Namespace) -> Path:
-    """Resolve model directory from CLI args — local path or HuggingFace download.
-
-    Args:
-        args: Parsed CLI arguments with model_dir and repo_id.
-
-    Returns:
-        Path to the directory containing OpenVINO IR models.
-
-    Raises:
-        FileNotFoundError: If the specified model directory does not exist.
-        ValueError: If neither --model-dir nor --repo-id is provided.
-    """
-    if args.model_dir:
-        model_dir = Path(args.model_dir)
-        if not model_dir.exists():
-            msg = f"Model directory not found: {model_dir}"
-            raise FileNotFoundError(msg)
-        return model_dir
-
-    if args.repo_id:
-        logger.info("Downloading models from HuggingFace: %s", args.repo_id)
-        local_dir = snapshot_download(repo_id=args.repo_id)
-        return Path(local_dir)
-
-    msg = "Provide either --model-dir or --repo-id"
-    raise ValueError(msg)
 
 
 def print_prediction_summary(
@@ -420,7 +393,14 @@ def example_6_combined_text_and_box(model: SAM3OpenVINO, *, save_viz: bool = Fal
         )
 
 
-def example_7_visual_exemplar(model_dir: Path, device: str, confidence: float, *, save_viz: bool = False) -> None:
+def example_7_visual_exemplar(
+    device: str,
+    confidence: float,
+    *,
+    model_dir: Path | None = None,
+    variant: SAM3OVVariant = SAM3OVVariant.FP16,
+    save_viz: bool = False,
+) -> None:
     """Example 7: Visual exemplar mode (few-shot detection).
 
     In visual exemplar mode, reference images with annotated bounding boxes are
@@ -435,15 +415,10 @@ def example_7_visual_exemplar(model_dir: Path, device: str, confidence: float, *
     logger.info("Example 7: Visual Exemplar Mode (Few-Shot)")
     logger.info("=" * 70)
 
-    # Check if required models are available
-    required = [model_dir / "prompt-decoder.xml", model_dir / "prompt-decoder.onnx"]
-    if not any(p.exists() for p in required):
-        logger.warning("Skipping — prompt-decoder model not found.")
-        return
-
-    # Create exemplar-mode model
+    # Create exemplar-mode model (auto-downloads if model_dir is None)
     ve_model = SAM3OpenVINO(
         model_dir=model_dir,
+        variant=variant,
         device=device,
         confidence_threshold=confidence,
         prompt_mode=Sam3PromptMode.VISUAL_EXEMPLAR,
@@ -497,13 +472,15 @@ def main() -> None:
         "--model-dir",
         type=str,
         default=None,
-        help="Local directory containing OpenVINO IR or ONNX model files.",
+        help="Local directory containing OpenVINO IR or ONNX model files. "
+        "If omitted, models are auto-downloaded from HuggingFace.",
     )
     parser.add_argument(
-        "--repo-id",
+        "--variant",
         type=str,
-        default=None,
-        help="HuggingFace repo ID to download models from (e.g., rajeshgangireddy/exported_sam3).",
+        default="FP16",
+        choices=[v.name for v in SAM3OVVariant],
+        help="Model variant when auto-downloading (default: FP16).",
     )
     parser.add_argument(
         "--device",
@@ -530,17 +507,17 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Resolve model directory
-    model_dir = resolve_model_dir(args)
-    logger.info("Model directory: %s", model_dir)
-
-    # Initialize SAM3 OpenVINO model
+    # Initialize SAM3 OpenVINO model (auto-downloads if --model-dir is not given)
+    variant = SAM3OVVariant[args.variant]
     t0 = time.perf_counter()
     model = SAM3OpenVINO(
-        model_dir=model_dir,
+        model_dir=args.model_dir,
+        variant=variant,
         device=args.device,
         confidence_threshold=args.confidence,
     )
+    model_dir = model.model_dir
+    logger.info("Model directory: %s", model_dir)
     logger.info("Model loaded in %.2f s", time.perf_counter() - t0)
 
     # Map of example functions
@@ -556,9 +533,10 @@ def main() -> None:
     # Example 7 uses a different model instance (exemplar mode)
     examples_special = {
         7: lambda _model, save_viz: example_7_visual_exemplar(
-            model_dir,
             args.device,
             args.confidence,
+            model_dir=args.model_dir,
+            variant=variant,
             save_viz=save_viz,
         ),
     }

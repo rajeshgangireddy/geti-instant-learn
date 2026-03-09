@@ -74,10 +74,11 @@ Pre-exported models are available on [HuggingFace](https://huggingface.co/rajesh
 
 ```python
 from instantlearn.models import SAM3OpenVINO
+from instantlearn.models.sam3 import SAM3OVVariant
 from instantlearn.data import Sample
 
 # Auto-downloads OpenVINO IR models from HuggingFace
-model = SAM3OpenVINO(variant="openvino-fp16", device="CPU")
+model = SAM3OpenVINO(variant=SAM3OVVariant.FP16, device="CPU")
 
 predictions = model.predict([
     Sample(image_path="examples/assets/coco/000000286874.jpg", categories=["elephant"]),

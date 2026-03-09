@@ -31,6 +31,7 @@ See Also:
 
 import logging
 from collections import defaultdict
+from enum import Enum
 from itertools import zip_longest
 from pathlib import Path
 
@@ -49,8 +50,21 @@ from .sam3 import Sam3PromptMode
 
 logger = logging.getLogger(__name__)
 
-# Default HuggingFace repo for tokenizer
-_DEFAULT_TOKENIZER_REPO = "rajeshgangireddy/exported_sam3"
+# Default HuggingFace repo for SAM3 OpenVINO models and tokenizer
+_DEFAULT_HF_REPO = "rajeshgangireddy/exported_sam3"
+
+
+class SAM3OVVariant(str, Enum):
+    """Available SAM3 OpenVINO model variants.
+
+    Each variant maps to a subdirectory name on HuggingFace Hub.
+    """
+
+    FP16 = "openvino-fp16"
+    FP32 = "openvino-fp32"
+    INT8 = "openvino-nncf-int8"
+    INT4 = "openvino-nncf-int4"
+
 
 # Sub-model file names
 _VISION_ENCODER = "vision-encoder"
@@ -132,21 +146,27 @@ class SAM3OpenVINO(Model):
         >>> from instantlearn.data.base.sample import Sample
         >>> import numpy as np
 
-        >>> # Classic mode — text prompting
-        >>> model = SAM3OpenVINO(model_dir="./sam3-openvino", device="CPU")
+        >>> # Auto-download default variant (FP16) from HuggingFace
+        >>> model = SAM3OpenVINO(device="CPU")
         >>> model.fit(Sample(categories=["elephant"], category_ids=[0]))
         >>> results = model.predict(
         ...     Sample(image_path="examples/assets/coco/000000286874.jpg", categories=["elephant"]),
         ... )
 
-        >>> # Classic mode — box prompting (elephant bounding box)
+        >>> # Auto-download INT8 quantised variant
+        >>> model = SAM3OpenVINO(variant=SAM3OVVariant.INT8, device="CPU")
+
+        >>> # Use a local model directory (no download)
+        >>> model = SAM3OpenVINO(model_dir="./sam3-openvino/openvino-fp16", device="CPU")
+
+        >>> # Box prompting (elephant bounding box)
         >>> target = Sample(
         ...     image_path="examples/assets/coco/000000286874.jpg",
         ...     bboxes=np.array([[180, 105, 490, 370]]),
         ... )
         >>> results = model.predict(target)
 
-        >>> # Classic mode — point prompting (click on elephant)
+        >>> # Point prompting (click on elephant)
         >>> target = Sample(
         ...     image_path="examples/assets/coco/000000286874.jpg",
         ...     points=np.array([[335, 240]]),
@@ -155,7 +175,7 @@ class SAM3OpenVINO(Model):
 
         >>> # Visual exemplar mode — fit on one image, predict on another
         >>> model_ve = SAM3OpenVINO(
-        ...     model_dir="./sam3-openvino",
+        ...     variant=SAM3OVVariant.FP16,
         ...     prompt_mode=Sam3PromptMode.VISUAL_EXEMPLAR,
         ... )
         >>> ref = Sample(
@@ -172,18 +192,24 @@ class SAM3OpenVINO(Model):
 
     def __init__(
         self,
-        model_dir: str | Path,
+        model_dir: str | Path | None = None,
         device: str = "CPU",
         confidence_threshold: float = 0.5,
         resolution: int = 1008,
         prompt_mode: Sam3PromptMode = Sam3PromptMode.CLASSIC,
         drop_spatial_bias: bool = True,
         tokenizer_path: str | Path | None = None,
+        variant: SAM3OVVariant = SAM3OVVariant.FP16,
+        repo_id: str = _DEFAULT_HF_REPO,
     ) -> None:
         """Initialise SAM3 OpenVINO model.
 
+        When *model_dir* is provided, models are loaded from the local directory.
+        Otherwise, the *variant* is automatically downloaded from HuggingFace Hub.
+
         Args:
             model_dir: Directory containing OpenVINO IR or ONNX sub-models.
+                When ``None``, models are auto-downloaded from HuggingFace Hub.
             device: OpenVINO device (``"CPU"``, ``"GPU"``, ``"AUTO"``).
                 PyTorch-style names (``"cuda"``, ``"cpu"``) are also accepted.
             confidence_threshold: Minimum confidence score for predictions.
@@ -194,10 +220,12 @@ class SAM3OpenVINO(Model):
                 coordinate projections/position encodings and keeps only pooled
                 visual features (better for cross-image transfer).
             tokenizer_path: Explicit tokenizer path or HuggingFace model ID.
+            variant: Model variant to download when *model_dir* is ``None``.
+            repo_id: HuggingFace repository ID for auto-download.
         """
         super().__init__()
 
-        self.model_dir = Path(model_dir)
+        self.model_dir = self._resolve_model_dir(model_dir, variant=variant, repo_id=repo_id)
         self.ov_device = device_to_openvino_device(device)
         self.confidence_threshold = confidence_threshold
         self.resolution = resolution
@@ -247,6 +275,15 @@ class SAM3OpenVINO(Model):
         else:
             self.geometry_exemplar_model = None
 
+        # Pre-create infer requests to avoid per-call allocation overhead (GPU)
+        self._vision_request = self.vision_model.create_infer_request()
+        self._text_request = self.text_model.create_infer_request()
+        self._decoder_request = self.decoder_model.create_infer_request()
+        self._geometry_request = self.geometry_model.create_infer_request() if self.geometry_model is not None else None
+        self._geometry_exemplar_request = (
+            self.geometry_exemplar_model.create_infer_request() if self.geometry_exemplar_model is not None else None
+        )
+
         self.image_preprocessor = Sam3Preprocessor(target_size=resolution)
         self.prompt_preprocessor = Sam3PromptPreprocessor(target_size=resolution)
         self.postprocessor = Sam3Postprocessor(
@@ -276,7 +313,55 @@ class SAM3OpenVINO(Model):
             return CLIPTokenizerFast.from_pretrained(str(tokenizer_path))
         if (self.model_dir / "tokenizer.json").exists():
             return CLIPTokenizerFast.from_pretrained(str(self.model_dir))
-        return CLIPTokenizerFast.from_pretrained(_DEFAULT_TOKENIZER_REPO)
+        return CLIPTokenizerFast.from_pretrained(_DEFAULT_HF_REPO)
+
+    # ------------------------------------------------------------------
+    # Model resolution / download
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_model_dir(
+        model_dir: str | Path | None,
+        *,
+        variant: SAM3OVVariant = SAM3OVVariant.FP16,
+        repo_id: str = _DEFAULT_HF_REPO,
+    ) -> Path:
+        """Resolve the model directory, downloading from HuggingFace if needed.
+
+        Args:
+            model_dir: Explicit local directory, or ``None`` for auto-download.
+            variant: Model variant to download.
+            repo_id: HuggingFace repository ID.
+
+        Returns:
+            Local ``Path`` to the directory containing the sub-model files.
+
+        Raises:
+            FileNotFoundError: If *model_dir* is given but does not exist.
+            ImportError: If ``huggingface_hub`` is not installed.
+        """
+        if model_dir is not None:
+            path = Path(model_dir)
+            if not path.is_dir():
+                msg = f"Model directory not found: {path}"
+                raise FileNotFoundError(msg)
+            return path
+
+        variant = SAM3OVVariant(variant)
+        subdir = variant.value
+
+        try:
+            from huggingface_hub import snapshot_download  # noqa: PLC0415
+        except ImportError:
+            msg = "huggingface_hub is required for auto-download. Install it with: uv pip install huggingface-hub"
+            raise ImportError(msg)  # noqa: B904
+
+        logger.info("Downloading SAM3 '%s' from HuggingFace: %s", variant.name, repo_id)
+        cache_dir = snapshot_download(
+            repo_id=repo_id,
+            allow_patterns=[f"{subdir}/*", "tokenizer*", "special_tokens_map*"],
+        )
+        return Path(cache_dir) / subdir
 
     # ------------------------------------------------------------------
     # Sub-model runners
@@ -291,12 +376,12 @@ class SAM3OpenVINO(Model):
         Returns:
             Dict with ``fpn_feat_0``, ``fpn_feat_1``, ``fpn_feat_2``, ``fpn_pos_2``.
         """
-        result = self.vision_model([pixel_values])
+        self._vision_request.infer([pixel_values])
         return {
-            "fpn_feat_0": result["fpn_feat_0"],
-            "fpn_feat_1": result["fpn_feat_1"],
-            "fpn_feat_2": result["fpn_feat_2"],
-            "fpn_pos_2": result["fpn_pos_2"],
+            "fpn_feat_0": np.array(self._vision_request.get_tensor("fpn_feat_0").data),
+            "fpn_feat_1": np.array(self._vision_request.get_tensor("fpn_feat_1").data),
+            "fpn_feat_2": np.array(self._vision_request.get_tensor("fpn_feat_2").data),
+            "fpn_pos_2": np.array(self._vision_request.get_tensor("fpn_pos_2").data),
         }
 
     def _run_text_encoder(
@@ -313,10 +398,10 @@ class SAM3OpenVINO(Model):
         Returns:
             Dict with ``text_features`` and ``text_mask``.
         """
-        result = self.text_model([input_ids, attention_mask])
+        self._text_request.infer([input_ids, attention_mask])
         return {
-            "text_features": result["text_features"],
-            "text_mask": result["text_mask"],
+            "text_features": np.array(self._text_request.get_tensor("text_features").data),
+            "text_mask": np.array(self._text_request.get_tensor("text_mask").data),
         }
 
     def _run_geometry_encoder(
@@ -353,7 +438,8 @@ class SAM3OpenVINO(Model):
             variant = "exemplar" if exemplar else "classic"
             msg = f"Geometry encoder ({variant}) is not loaded. Re-export models."
             raise RuntimeError(msg)
-        result = model([
+        request = self._geometry_exemplar_request if exemplar else self._geometry_request
+        request.infer([
             fpn_feat_2,
             fpn_pos_2,
             input_boxes,
@@ -362,8 +448,8 @@ class SAM3OpenVINO(Model):
             input_points_labels,
         ])
         return {
-            "geometry_features": result["geometry_features"],
-            "geometry_mask": result["geometry_mask"],
+            "geometry_features": np.array(request.get_tensor("geometry_features").data),
+            "geometry_mask": np.array(request.get_tensor("geometry_mask").data),
         }
 
     def _run_prompt_decoder(
@@ -383,7 +469,7 @@ class SAM3OpenVINO(Model):
             Dict with ``pred_masks``, ``pred_boxes``, ``pred_logits``,
             ``presence_logits``.
         """
-        result = self.decoder_model([
+        self._decoder_request.infer([
             vision_features["fpn_feat_0"],
             vision_features["fpn_feat_1"],
             vision_features["fpn_feat_2"],
@@ -392,10 +478,10 @@ class SAM3OpenVINO(Model):
             prompt_mask,
         ])
         return {
-            "pred_masks": result["pred_masks"],
-            "pred_boxes": result["pred_boxes"],
-            "pred_logits": result["pred_logits"],
-            "presence_logits": result["presence_logits"],
+            "pred_masks": np.array(self._decoder_request.get_tensor("pred_masks").data),
+            "pred_boxes": np.array(self._decoder_request.get_tensor("pred_boxes").data),
+            "pred_logits": np.array(self._decoder_request.get_tensor("pred_logits").data),
+            "presence_logits": np.array(self._decoder_request.get_tensor("presence_logits").data),
         }
 
     # ------------------------------------------------------------------
