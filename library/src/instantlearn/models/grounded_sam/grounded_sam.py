@@ -6,7 +6,7 @@
 import torch
 
 from instantlearn.components import SamDecoder
-from instantlearn.components.postprocessing import PostProcessor
+from instantlearn.components.postprocessing import PostProcessor, default_postprocessor
 from instantlearn.components.sam import load_sam_model
 from instantlearn.data.base.batch import Batch, Collatable
 from instantlearn.data.base.sample import Sample
@@ -41,8 +41,12 @@ class GroundedSAM(Model):
             box_threshold: The box threshold.
             text_threshold: The text threshold.
             device: The device to use.
-            postprocessor: Optional post-processor applied after predict().
+            postprocessor: Post-processor applied after predict().
+                Defaults to :func:`~instantlearn.components.postprocessing.default_postprocessor`
+                (MaskIoMNMS + BoxIoMNMS).
         """
+        if postprocessor is None:
+            postprocessor = default_postprocessor()
         super().__init__(postprocessor=postprocessor)
         self.sam_predictor = load_sam_model(
             sam,

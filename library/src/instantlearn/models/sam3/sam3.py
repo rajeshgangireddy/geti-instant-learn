@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from transformers import CLIPTokenizerFast
 
-from instantlearn.components.postprocessing import PostProcessor
+from instantlearn.components.postprocessing import PostProcessor, default_postprocessor
 from instantlearn.data.base.batch import Batch, Collatable
 from instantlearn.data.base.sample import Sample
 from instantlearn.models.base import Model
@@ -157,8 +157,12 @@ class SAM3(Model):
                 coordinate projection and position encoding in the geometry
                 encoder, keeping only ROI-pooled visual features. This removes
                 spatial bias from the reference image position. Default: False.
-            postprocessor: Optional post-processor applied after predict().
+            postprocessor: Post-processor applied after predict().
+                Defaults to :func:`~instantlearn.components.postprocessing.default_postprocessor`
+                (MaskIoMNMS + BoxIoMNMS).
         """
+        if postprocessor is None:
+            postprocessor = default_postprocessor()
         super().__init__(postprocessor=postprocessor)
 
         self.device = device

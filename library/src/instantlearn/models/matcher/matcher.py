@@ -47,14 +47,16 @@ class EncoderForwardFeaturesWrapper(nn.Module):
         self.encoder = encoder
         self.ignore_token_length = ignore_token_length
         self.input_size = input_size
-        self.register_buffer("mean", torch.tensor((0.485, 0.456, 0.406)))
-        self.register_buffer("std", torch.tensor((0.229, 0.224, 0.225)))
+        self.register_buffer("IMAGENET_DEFAULT_MEAN", torch.tensor((0.485, 0.456, 0.406)))
+        self.register_buffer("IMAGENET_DEFAULT_STD", torch.tensor((0.229, 0.224, 0.225)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass to get encoder features."""
+        imagenet_mean = self.IMAGENET_DEFAULT_MEAN.to(device=x.device, dtype=x.dtype)
+        imagenet_std = self.IMAGENET_DEFAULT_STD.to(device=x.device, dtype=x.dtype)
         x = x.float() / 255.0
         x = functional.interpolate(x, size=(self.input_size, self.input_size), mode="bilinear")
-        x = (x - self.mean[None, :, None, None]) / self.std[None, :, None, None]
+        x = (x - imagenet_mean[None, :, None, None]) / imagenet_std[None, :, None, None]
         features = self.encoder.forward_features(x)
         features = features[:, self.ignore_token_length :, :]  # ignore CLS and other tokens
         return functional.normalize(features, p=2, dim=-1)
@@ -85,26 +87,34 @@ class MatcherInferenceGraph(nn.Module):
         self.register_buffer("ref_embeddings", ref_features.ref_embeddings)
         self.register_buffer("masked_ref_embeddings", ref_features.masked_ref_embeddings)
         self.register_buffer("flatten_ref_masks", ref_features.flatten_ref_masks)
-        self.register_buffer("category_ids", torch.tensor(ref_features.category_ids))
+        self.register_buffer("category_ids", torch.tensor(ref_features.category_ids, device=ref_features.device))
 
     def forward(self, target_image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Single image forward pass for export: target_image [1, 3, H, W] → (masks, scores, labels)."""
-        # Get original size from input tensor [1, 3, H, W]
-        original_sizes = torch.stack([
-            torch.tensor(target_image.size(2)),
-            torch.tensor(target_image.size(3)),
-        ]).unsqueeze(0)
-
         # Encode target [1, num_patches, embed_dim]
         target_embeddings = self.encoder(target_image)
+        feature_device = target_embeddings.device
+
+        # Align frozen reference tensors to target embedding device for trace-time safety.
+        # This prevents mixed-device matmul when model buffers and encoder output diverge.
+        ref_embeddings = self.ref_embeddings.to(feature_device)
+        masked_ref_embeddings = self.masked_ref_embeddings.to(feature_device)
+        flatten_ref_masks = self.flatten_ref_masks.to(feature_device)
+        category_ids = self.category_ids.to(feature_device)
+
+        # Get original size from input tensor [1, 3, H, W] using public APIs only.
+        # scalar_tensor preserves dynamic shape in export without relying on private/legacy ONNX helpers.
+        height = torch.scalar_tensor(target_image.shape[2], dtype=torch.long, device=feature_device)
+        width = torch.scalar_tensor(target_image.shape[3], dtype=torch.long, device=feature_device)
+        original_sizes = torch.stack([height, width], dim=0).unsqueeze(0)
 
         # Generate prompts using frozen ref_features
         # point_prompts: [1, C, max_points, 4], num_points: [1, C], similarities: [1, C, feat_size, feat_size]
         point_prompts, similarities = self.prompt_generator.forward(
-            self.ref_embeddings,
-            self.masked_ref_embeddings,
-            self.flatten_ref_masks,
-            self.category_ids,
+            ref_embeddings,
+            masked_ref_embeddings,
+            flatten_ref_masks,
+            category_ids,
             target_embeddings,
             original_sizes,
         )
@@ -112,7 +122,7 @@ class MatcherInferenceGraph(nn.Module):
         # Decode using export-friendly method (single image, returns tensors)
         masks, scores, labels = self.sam_decoder.forward_export(
             target_image[0],  # Single image [3, H, W]
-            self.category_ids,
+            category_ids,
             point_prompts[0],  # [C, max_points, 4]
             similarities[0],  # [C, feat_size, feat_size]
         )
@@ -344,6 +354,17 @@ class Matcher(Model):
         export_path = Path(export_dir)
         export_path.mkdir(parents=True, exist_ok=True)
 
+        export_device = self.ref_features.device
+        if backend == Backend.OPENVINO:
+            export_device = torch.device("cpu")
+        first_encoder_param = next(iter(self.encoder._model.model.parameters()), None)  # noqa: SLF001
+        if backend != Backend.OPENVINO and isinstance(first_encoder_param, torch.Tensor):
+            export_device = first_encoder_param.device
+
+        self.sam_predictor.sync_device(export_device)
+        self.segmenter.device = self.sam_predictor.device
+        ref_features = self.ref_features.to(export_device)
+
         matcher = MatcherInferenceGraph(
             encoder=EncoderForwardFeaturesWrapper(
                 self.encoder._model.model,  # noqa: SLF001
@@ -351,11 +372,11 @@ class Matcher(Model):
             ),
             prompt_generator=self.prompt_generator,
             sam_decoder=self.segmenter,
-            ref_features=self.ref_features,
+            ref_features=ref_features,
             postprocessor=self.postprocessor,
-        )
+        ).to(export_device)
 
-        target_image = torch.randn(1, 3, self.encoder.input_size, self.encoder.input_size)
+        target_image = torch.randn(1, 3, self.encoder.input_size, self.encoder.input_size, device=export_device)
         if backend == Backend.ONNX:
             onnx_path = export_path / "matcher.onnx"
             torch.onnx.export(
@@ -370,7 +391,6 @@ class Matcher(Model):
                     "scores": {0: "num_masks"},
                     "labels": {0: "num_masks"},
                 },
-                verbose=True,
                 dynamo=False,
             )
             return onnx_path
@@ -397,8 +417,16 @@ class Matcher(Model):
                     },
                     dynamo=False,
                 )
-                # Convert ONNX to OpenVINO
-                ov_model = openvino.convert_model(onnx_path)
+                # Prefer ONNX frontend path for better operator coverage.
+                # Fall back to direct conversion when ONNX export output is unavailable.
+                core = openvino.Core()
+                if onnx_path.exists():
+                    try:
+                        ov_model = core.read_model(str(onnx_path))
+                    except RuntimeError:
+                        ov_model = openvino.convert_model(matcher, example_input=target_image)
+                else:
+                    ov_model = openvino.convert_model(matcher, example_input=target_image)
                 openvino.save_model(ov_model, export_path / "matcher.xml")
                 return export_path / "matcher.xml"
             except ImportError as e:
