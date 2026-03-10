@@ -5,9 +5,16 @@ from instantlearn.data.base.batch import Batch
 from instantlearn.models.matcher import Matcher
 from instantlearn.models.per_dino import PerDino
 from instantlearn.models.soft_matcher import SoftMatcher
-from instantlearn.models.yoloe import YOLOE
+from instantlearn.models.yoloe import YOLOE, YOLOEOpenVINO
 
-from domain.services.schemas.processor import MatcherConfig, ModelConfig, PerDinoConfig, SoftMatcherConfig, YoloeConfig
+from domain.services.schemas.processor import (
+    MatcherConfig,
+    ModelConfig,
+    PerDinoConfig,
+    SoftMatcherConfig,
+    YoloeConfig,
+    YoloeOpenvinoConfig,
+)
 from runtime.core.components.base import ModelHandler
 from runtime.core.components.models.inference_model import InferenceModelHandler
 from runtime.core.components.models.passthrough_model import PassThroughModelHandler
@@ -78,6 +85,14 @@ class ModelFactory:
                     imgsz=config.imgsz,
                     use_nms=config.use_nms,
                     precision=config.precision,
+                    device=settings.device,
+                )
+                return InferenceModelHandler(model, reference_batch)
+            case YoloeOpenvinoConfig() as config:
+                model = YOLOEOpenVINO(
+                    model_dir=config.model_dir,
+                    confidence_threshold=config.confidence_threshold,
+                    iou_threshold=config.iou_threshold,
                     device=settings.device,
                 )
                 return InferenceModelHandler(model, reference_batch)

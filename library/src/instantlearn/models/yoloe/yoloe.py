@@ -134,9 +134,12 @@ class YOLOE(Model):
             )
             raise ImportError(msg) from e
 
-        model_path = YOLOE_MODELS[self.model_name]
+        from instantlearn.utils.weights import get_weights_path
+
+        model_file = YOLOE_MODELS[self.model_name]
+        model_path = get_weights_path(model_file)
         logger.info("Loading YOLOE model: %s", model_path)
-        model = YOLO(model_path)
+        model = YOLO(str(model_path))
 
         return model
 

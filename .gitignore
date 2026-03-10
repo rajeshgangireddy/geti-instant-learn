@@ -148,5 +148,8 @@ cython_debug/
 tmp*
 lightning_logs
 
+# Model weights 
+*.pt
+
 # Autosummary generated rst files
 library/**/_autosummary/

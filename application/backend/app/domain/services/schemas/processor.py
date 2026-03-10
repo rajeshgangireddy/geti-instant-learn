@@ -19,6 +19,7 @@ class ModelType(StrEnum):
     PERDINO = "perdino"
     SOFT_MATCHER = "soft_matcher"
     YOLOE = "yoloe"
+    YOLOE_OPENVINO = "yoloe_openvino"
 
 
 ALLOWED_SAM_MODELS: tuple[SAMModelName, ...] = (
@@ -190,8 +191,32 @@ class YoloeConfig(BaseModel):
     }
 
 
+class YoloeOpenvinoConfig(BaseModel):
+    """Configuration for YOLOE OpenVINO model.
+
+    Runs inference on a pre-exported OpenVINO IR where target classes
+    were baked in at export time.
+    """
+
+    model_type: Literal[ModelType.YOLOE_OPENVINO] = ModelType.YOLOE_OPENVINO
+    model_dir: str = Field(description="Path to the exported OpenVINO model directory")
+    confidence_threshold: float = Field(default=0.25, gt=0.0, lt=1.0)
+    iou_threshold: float = Field(default=0.7, gt=0.0, lt=1.0)
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "model_type": "yoloe_openvino",
+                "model_dir": "exports/yoloe_openvino",
+                "confidence_threshold": 0.25,
+                "iou_threshold": 0.7,
+            }
+        }
+    }
+
+
 ModelConfig = Annotated[
-    PerDinoConfig | MatcherConfig | SoftMatcherConfig | YoloeConfig,
+    PerDinoConfig | MatcherConfig | SoftMatcherConfig | YoloeConfig | YoloeOpenvinoConfig,
     Field(discriminator="model_type"),
 ]
 
