@@ -1,9 +1,9 @@
 # Copyright (C) 2025-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""Centralized model weights caching.
+"""YOLOE model weights caching.
 
-All YOLOE (and future ultralytics-based) weights are stored under
+All YOLOE weights are stored under
 ``~/.cache/instantlearn/ultralytics/weights/`` so they are downloaded
 once and shared across library and application usage.
 """
@@ -30,6 +30,9 @@ def get_weights_path(filename: str) -> Path:
 
     Returns:
         Absolute path to the cached weights file.
+
+    Raises:
+        ImportError: If ultralytics is not installed.
     """
     WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
     cached = WEIGHTS_DIR / filename

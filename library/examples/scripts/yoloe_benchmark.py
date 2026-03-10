@@ -58,7 +58,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-ASSETS = Path(__file__).parent / "assets" / "coco"
+ASSETS = Path(__file__).resolve().parent.parent / "assets" / "coco"
 REF_IMAGE = ASSETS / "000000286874.jpg"
 REF_MASK = ASSETS / "000000286874_mask.png"
 TARGET_IMAGES = [
@@ -276,7 +276,7 @@ def run_benchmark(
         print(f"\n  [{model_name}] Loading...")
 
         from ultralytics import YOLO
-        from instantlearn.utils.weights import get_weights_path
+        from instantlearn.models.yoloe.weights import get_weights_path
         ul_model = YOLO(str(get_weights_path(YOLOE_MODELS[model_name])))
 
         # Set text prompt: compute text embeddings and fuse into weights

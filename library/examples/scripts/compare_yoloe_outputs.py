@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ── Constants ────────────────────────────────────────────────────────
-ASSETS = Path(__file__).parent / "assets" / "coco"
+ASSETS = Path(__file__).resolve().parent.parent / "assets" / "coco"
 REF_IMAGE = ASSETS / "000000286874.jpg"
 REF_MASK = ASSETS / "000000286874_mask.png"
 TARGET_IMAGES = [
@@ -225,7 +225,7 @@ def run_pytorch_tp(
 ) -> list[dict]:
     """PyTorch text prompt inference on multiple targets."""
     from ultralytics import YOLO
-    from instantlearn.utils.weights import get_weights_path
+    from instantlearn.models.yoloe.weights import get_weights_path
 
     ul_model = YOLO(str(get_weights_path(YOLOE_MODELS[model_name])))
     inner = ul_model.model
@@ -394,7 +394,7 @@ def main() -> None:
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=Path(__file__).resolve().parent.parent,  # library/
+        default=Path(__file__).resolve().parent.parent.parent,  # library/
         help="Directory to save the output images (default: library/).",
     )
     args = parser.parse_args()

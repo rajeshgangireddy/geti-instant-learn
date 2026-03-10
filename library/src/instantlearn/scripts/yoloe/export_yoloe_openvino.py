@@ -88,7 +88,7 @@ def export_yoloe_openvino(
     from ultralytics import YOLO
 
     from instantlearn.models.yoloe.yoloe import YOLOE_MODELS
-    from instantlearn.utils.weights import get_weights_path
+    from instantlearn.models.yoloe.weights import get_weights_path
 
     if model_name not in YOLOE_MODELS:
         available = ", ".join(YOLOE_MODELS.keys())

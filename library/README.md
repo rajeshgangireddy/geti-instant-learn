@@ -65,7 +65,7 @@ predictions = model.predict([
 > specify categories on every target sample. If not called, categories are taken from
 > each target sample directly.
 
-For more examples of SAM3 capabilities, see the [SAM3 aerial & maritime notebook](examples/sam3_aerial_maritime_example.ipynb).
+For more examples of SAM3 capabilities, see the [SAM3 aerial & maritime notebook](examples/notebooks/sam3_aerial_maritime_example.ipynb).
 
 Since SAM3 requires a text prompt for every sample (unless `fit()` is used), this is where **Matcher** comes in —
 you fit once with a reference mask (one-shot) and predict on any number of new images without providing prompts again.

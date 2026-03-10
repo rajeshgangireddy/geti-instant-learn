@@ -30,7 +30,7 @@ from instantlearn.scripts.yoloe.export_yoloe_openvino import export_yoloe_openvi
 # ---------------------------------------------------------------------------
 # Config — elephant example from library README
 # ---------------------------------------------------------------------------
-ASSETS = Path(__file__).parent / "assets" / "coco"
+ASSETS = Path(__file__).resolve().parent.parent / "assets" / "coco"
 REF_IMAGE = ASSETS / "000000286874.jpg"
 REF_MASK = ASSETS / "000000286874_mask.png"
 TARGET_IMAGES = [

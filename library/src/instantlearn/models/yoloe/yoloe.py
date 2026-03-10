@@ -127,6 +127,8 @@ class YOLOE(Model):
         """
         try:
             from ultralytics import YOLO
+
+            logging.getLogger("ultralytics").setLevel(logging.WARNING)
         except ImportError as e:
             msg = (
                 "ultralytics is required for YOLOE. "
@@ -134,12 +136,13 @@ class YOLOE(Model):
             )
             raise ImportError(msg) from e
 
-        from instantlearn.utils.weights import get_weights_path
+        from instantlearn.models.yoloe.weights import get_weights_path
 
         model_file = YOLOE_MODELS[self.model_name]
         model_path = get_weights_path(model_file)
         logger.info("Loading YOLOE model: %s", model_path)
         model = YOLO(str(model_path))
+        model.to(self.device_name)
 
         return model
 
@@ -296,6 +299,7 @@ class YOLOE(Model):
                 conf=self.confidence_threshold,
                 iou=self.iou_threshold,
                 imgsz=self.imgsz,
+                device=self.device_name,
                 verbose=False,
             )
 
