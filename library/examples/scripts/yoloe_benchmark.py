@@ -20,8 +20,14 @@ Usage::
     # Full benchmark on CPU (default)
     python examples/yoloe_benchmark.py
 
-    # OpenVINO on Intel GPU (use --ov-device GPU)
-    python examples/yoloe_benchmark.py --ov-device GPU
+    # OpenVINO on Intel GPU, PyTorch on CPU (no CUDA required)
+    python examples/yoloe_benchmark.py --ov-device GPU --torch-device cpu
+
+    # OpenVINO on Intel GPU, PyTorch on CUDA GPU
+    python examples/yoloe_benchmark.py --ov-device GPU --torch-device cuda
+
+    # OpenVINO on Intel GPU, PyTorch on Intel GPU via IPEX
+    python examples/yoloe_benchmark.py --ov-device GPU --torch-device xpu
 
     # Subset of models / formats
     python examples/yoloe_benchmark.py --models 26n 26s --formats fp32 fp16
@@ -216,6 +222,7 @@ def run_benchmark(
     formats: list[str],
     n_iters: int,
     ov_device: str,
+    torch_device: str,
     csv_path: Path,
 ) -> None:
     ref_sample, target_samples = make_samples()
@@ -224,14 +231,14 @@ def run_benchmark(
 
     # ---- Phase 1: PyTorch visual prompt ---------------------------------
     print("\n" + "=" * 70)
-    print("Phase 1 — PyTorch Visual Prompt (GPU)")
+    print(f"Phase 1 — PyTorch Visual Prompt ({torch_device})")
     print("=" * 70)
 
     for vkey in models:
         model_name = MODEL_VARIANTS[vkey]
         print(f"\n  [{model_name}] Loading...")
         pt_model = YOLOE(
-            model_name=model_name, device="cuda", imgsz=IMGSZ, precision="fp32",
+            model_name=model_name, device=torch_device, imgsz=IMGSZ, precision="fp32",
         )
         pt_model.fit(ref_sample)
 
@@ -246,7 +253,7 @@ def run_benchmark(
             "model": model_name,
             "backend": "pytorch",
             "format": "fp32",
-            "device": "cuda",
+            "device": torch_device,
             "mode": "visual_prompt",
             "avg_ms": round(avg_ms, 2),
             "min_ms": round(min(times) * 1000, 2),
@@ -255,14 +262,16 @@ def run_benchmark(
         })
         print(f"  [{model_name}] avg={avg_ms:.1f} ms")
 
-        # Free GPU memory
         del pt_model
         gc.collect()
-        torch.cuda.empty_cache()
+        if torch_device == "cuda":
+            torch.cuda.empty_cache()
+        elif torch_device == "xpu":
+            torch.xpu.empty_cache()
 
     # ---- Phase 2: PyTorch text prompt ------------------------------------
     print("\n" + "=" * 70)
-    print("Phase 2 — PyTorch Text Prompt (GPU)")
+    print(f"Phase 2 — PyTorch Text Prompt ({torch_device})")
     print("=" * 70)
 
     # Preload target images as numpy for raw ultralytics predict
@@ -284,8 +293,7 @@ def run_benchmark(
         text_pe = inner.get_text_pe(CLASSES)
         inner.set_classes(CLASSES, text_pe)
 
-        # Move to GPU
-        ul_model.to("cuda")
+        ul_model.to(torch_device)
 
         # Warmup
         ul_model.predict(
@@ -302,7 +310,7 @@ def run_benchmark(
             "model": model_name,
             "backend": "pytorch",
             "format": "fp32",
-            "device": "cuda",
+            "device": torch_device,
             "mode": "text_prompt",
             "avg_ms": round(avg_ms, 2),
             "min_ms": round(min(times) * 1000, 2),
@@ -313,7 +321,10 @@ def run_benchmark(
 
         del ul_model, inner
         gc.collect()
-        torch.cuda.empty_cache()
+        if torch_device == "cuda":
+            torch.cuda.empty_cache()
+        elif torch_device == "xpu":
+            torch.xpu.empty_cache()
 
     # ---- Phase 3: OpenVINO text prompt ----------------------------------
     print("\n" + "=" * 70)
@@ -515,6 +526,12 @@ def parse_args() -> argparse.Namespace:
         help="OpenVINO device for inference (default: CPU). Use GPU for Intel GPU.",
     )
     parser.add_argument(
+        "--torch-device",
+        type=str,
+        default="cuda",
+        help="Device for PyTorch phases 1 & 2 (default: cuda). Use 'cpu' for CPU, 'xpu' for Intel GPU via IPEX.",
+    )
+    parser.add_argument(
         "--csv",
         type=str,
         default="exports/yoloe_benchmark/results.csv",
@@ -534,6 +551,7 @@ def main() -> None:
         formats=args.formats,
         n_iters=args.iters,
         ov_device=args.ov_device,
+        torch_device=args.torch_device,
         csv_path=Path(args.csv),
     )
 
