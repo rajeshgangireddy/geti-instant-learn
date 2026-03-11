@@ -7,7 +7,7 @@ import argparse
 example_path = Path("examples/assets/coco")
 
 
-default_variant =  "yoloe-26x-seg"
+default_variant =  "yoloe-26n-seg"
 
 
 def infer_n_times(model, samples, n=20):
