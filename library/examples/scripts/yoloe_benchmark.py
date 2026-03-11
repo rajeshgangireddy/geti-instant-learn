@@ -217,6 +217,36 @@ def get_ref_bboxes() -> list[list[float]]:
 # ---------------------------------------------------------------------------
 # Main benchmark
 # ---------------------------------------------------------------------------
+def _prepare_torch_device(torch_device: str) -> bool:
+    """Validate the requested torch device and import IPEX if needed for XPU.
+
+    Returns True if the device is usable, False if phases should be skipped.
+    """
+    if torch_device == "xpu":
+        try:
+            import intel_extension_for_pytorch as ipex  # noqa: F401
+        except ImportError:
+            print(
+                "WARNING: --torch-device xpu requires Intel Extension for PyTorch (IPEX). "
+                "Install it with: pip install intel-extension-for-pytorch\n"
+                "Skipping PyTorch phases (1 & 2)."
+            )
+            return False
+        if not torch.xpu.is_available():
+            print(
+                "WARNING: torch.xpu reports no XPU devices available. "
+                "Skipping PyTorch phases (1 & 2)."
+            )
+            return False
+    elif torch_device == "cuda" and not torch.cuda.is_available():
+        print(
+            "WARNING: --torch-device cuda requested but no CUDA devices are available. "
+            "Skipping PyTorch phases (1 & 2). Use --torch-device cpu or --torch-device xpu."
+        )
+        return False
+    return True
+
+
 def run_benchmark(
     models: list[str],
     formats: list[str],
@@ -228,103 +258,110 @@ def run_benchmark(
     ref_sample, target_samples = make_samples()
 
     rows: list[dict[str, str | float]] = []
+    run_torch_phases = _prepare_torch_device(torch_device)
 
     # ---- Phase 1: PyTorch visual prompt ---------------------------------
     print("\n" + "=" * 70)
     print(f"Phase 1 — PyTorch Visual Prompt ({torch_device})")
     print("=" * 70)
 
-    for vkey in models:
-        model_name = MODEL_VARIANTS[vkey]
-        print(f"\n  [{model_name}] Loading...")
-        pt_model = YOLOE(
-            model_name=model_name, device=torch_device, imgsz=IMGSZ, precision="fp32",
-        )
-        pt_model.fit(ref_sample)
+    if not run_torch_phases:
+        print("  Skipped.")
+    else:
+        for vkey in models:
+            model_name = MODEL_VARIANTS[vkey]
+            print(f"\n  [{model_name}] Loading...")
+            pt_model = YOLOE(
+                model_name=model_name, device=torch_device, imgsz=IMGSZ, precision="fp32",
+            )
+            pt_model.fit(ref_sample)
 
-        # Warmup
-        pt_model.predict(target_samples[0])
+            # Warmup
+            pt_model.predict(target_samples[0])
 
-        print(f"  [{model_name}] Running {n_iters} predictions...")
-        times = benchmark_predict(pt_model, target_samples, n_iters)
-        avg_ms = trimmed_avg(times) * 1000.0
+            print(f"  [{model_name}] Running {n_iters} predictions...")
+            times = benchmark_predict(pt_model, target_samples, n_iters)
+            avg_ms = trimmed_avg(times) * 1000.0
 
-        rows.append({
-            "model": model_name,
-            "backend": "pytorch",
-            "format": "fp32",
-            "device": torch_device,
-            "mode": "visual_prompt",
-            "avg_ms": round(avg_ms, 2),
-            "min_ms": round(min(times) * 1000, 2),
-            "max_ms": round(max(times) * 1000, 2),
-            "n_iters": n_iters,
-        })
-        print(f"  [{model_name}] avg={avg_ms:.1f} ms")
+            rows.append({
+                "model": model_name,
+                "backend": "pytorch",
+                "format": "fp32",
+                "device": torch_device,
+                "mode": "visual_prompt",
+                "avg_ms": round(avg_ms, 2),
+                "min_ms": round(min(times) * 1000, 2),
+                "max_ms": round(max(times) * 1000, 2),
+                "n_iters": n_iters,
+            })
+            print(f"  [{model_name}] avg={avg_ms:.1f} ms")
 
-        del pt_model
-        gc.collect()
-        if torch_device == "cuda":
-            torch.cuda.empty_cache()
-        elif torch_device == "xpu":
-            torch.xpu.empty_cache()
+            del pt_model
+            gc.collect()
+            if torch_device == "cuda":
+                torch.cuda.empty_cache()
+            elif torch_device == "xpu":
+                torch.xpu.empty_cache()
 
     # ---- Phase 2: PyTorch text prompt ------------------------------------
     print("\n" + "=" * 70)
     print(f"Phase 2 — PyTorch Text Prompt ({torch_device})")
     print("=" * 70)
 
-    # Preload target images as numpy for raw ultralytics predict
-    target_images_np = [
-        cv2.cvtColor(cv2.imread(str(p)), cv2.COLOR_BGR2RGB)
-        for p in TARGET_IMAGES
-    ]
+    if not run_torch_phases:
+        print("  Skipped.")
+    else:
+        # Preload target images as numpy for raw ultralytics predict
+        target_images_np = [
+            cv2.cvtColor(cv2.imread(str(p)), cv2.COLOR_BGR2RGB)
+            for p in TARGET_IMAGES
+        ]
 
-    for vkey in models:
-        model_name = MODEL_VARIANTS[vkey]
-        print(f"\n  [{model_name}] Loading...")
+        for vkey in models:
+            model_name = MODEL_VARIANTS[vkey]
+            print(f"\n  [{model_name}] Loading...")
 
-        from ultralytics import YOLO
-        from instantlearn.models.yoloe.weights import get_weights_path
-        ul_model = YOLO(str(get_weights_path(YOLOE_MODELS[model_name])))
+            from ultralytics import YOLO
+            from instantlearn.models.yoloe.weights import get_weights_path
+            ul_model = YOLO(str(get_weights_path(YOLOE_MODELS[model_name])))
 
-        # Set text prompt: compute text embeddings and fuse into weights
-        inner = ul_model.model
-        text_pe = inner.get_text_pe(CLASSES)
-        inner.set_classes(CLASSES, text_pe)
+            # Set text prompt: compute text embeddings and fuse into weights
+            inner = ul_model.model
+            text_pe = inner.get_text_pe(CLASSES)
+            inner.set_classes(CLASSES, text_pe)
 
-        ul_model.to(torch_device)
+            ul_model.to(torch_device)
 
-        # Warmup
-        ul_model.predict(
-            source=target_images_np[0], imgsz=IMGSZ, conf=0.25, verbose=False,
-        )
+            # Warmup
+            ul_model.predict(
+                source=target_images_np[0], imgsz=IMGSZ, conf=0.25, verbose=False,
+            )
 
-        print(f"  [{model_name}] Running {n_iters} predictions...")
-        times = benchmark_predict_text_prompt(
-            ul_model, target_images_np, n_iters, IMGSZ,
-        )
-        avg_ms = trimmed_avg(times) * 1000.0
+            print(f"  [{model_name}] Running {n_iters} predictions...")
+            times = benchmark_predict_text_prompt(
+                ul_model, target_images_np, n_iters, IMGSZ,
+            )
+            avg_ms = trimmed_avg(times) * 1000.0
 
-        rows.append({
-            "model": model_name,
-            "backend": "pytorch",
-            "format": "fp32",
-            "device": torch_device,
-            "mode": "text_prompt",
-            "avg_ms": round(avg_ms, 2),
-            "min_ms": round(min(times) * 1000, 2),
-            "max_ms": round(max(times) * 1000, 2),
-            "n_iters": n_iters,
-        })
-        print(f"  [{model_name}] avg={avg_ms:.1f} ms")
+            rows.append({
+                "model": model_name,
+                "backend": "pytorch",
+                "format": "fp32",
+                "device": torch_device,
+                "mode": "text_prompt",
+                "avg_ms": round(avg_ms, 2),
+                "min_ms": round(min(times) * 1000, 2),
+                "max_ms": round(max(times) * 1000, 2),
+                "n_iters": n_iters,
+            })
+            print(f"  [{model_name}] avg={avg_ms:.1f} ms")
 
-        del ul_model, inner
-        gc.collect()
-        if torch_device == "cuda":
-            torch.cuda.empty_cache()
-        elif torch_device == "xpu":
-            torch.xpu.empty_cache()
+            del ul_model, inner
+            gc.collect()
+            if torch_device == "cuda":
+                torch.cuda.empty_cache()
+            elif torch_device == "xpu":
+                torch.xpu.empty_cache()
 
     # ---- Phase 3: OpenVINO text prompt ----------------------------------
     print("\n" + "=" * 70)
