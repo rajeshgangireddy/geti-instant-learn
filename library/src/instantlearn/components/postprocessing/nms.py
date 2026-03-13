@@ -198,6 +198,11 @@ def _matrix_nms(
     suppresses B, B cannot influence C).  In practice, results are very
     similar for typical mask counts.
 
+    To avoid empty-tensor issues during ONNX tracing (when the decoder
+    produces 0 masks for the random trace input), a dummy entry with
+    score ``-inf`` and overlap ``0`` is appended before processing and
+    stripped from the result.
+
     Args:
         scores: Confidence scores ``[N]``.
         overlap_matrix: Pairwise overlap values ``[N, N]`` (IoU or IoM).
@@ -206,22 +211,30 @@ def _matrix_nms(
     Returns:
         Indices of kept masks (in original ordering) as a 1-D int64 tensor.
     """
-    order = torch.argsort(scores, descending=True)
+    n = scores.shape[0]
+
+    # Pad with a dummy entry to guarantee at least 1 row for .max()
+    # The dummy has score=-inf (always last after sort) and zero overlap
+    padded_scores = torch.cat([scores, torch.full((1,), -1e9, device=scores.device)])
+    padded_overlap = torch.nn.functional.pad(overlap_matrix, [0, 1, 0, 1], value=0.0)
+
+    order = torch.argsort(padded_scores, descending=True)
 
     # Reorder overlap matrix so rows/cols follow descending score
-    sorted_overlap = overlap_matrix[order][:, order]  # [N, N]
+    sorted_overlap = padded_overlap[order][:, order]  # [N+1, N+1]
 
     # Lower-triangular mask (row i only sees columns 0..i-1 = higher-scored)
     lower_tri = torch.ones_like(sorted_overlap).tril(diagonal=-1)
 
     # Max overlap of each mask with any higher-scored mask
-    max_overlap = (sorted_overlap * lower_tri).max(dim=1).values  # [N]
+    max_overlap = (sorted_overlap * lower_tri).max(dim=1).values  # [N+1]
 
     # Keep masks where max overlap with higher-scored masks <= threshold
     keep_sorted = max_overlap <= threshold
 
-    # Map back to original indices
-    return order[keep_sorted]
+    # Map back to original indices and remove the dummy entry (index == n)
+    kept = order[keep_sorted]
+    return kept[kept < n]
 
 
 def _matrix_soft_nms(
@@ -243,6 +256,9 @@ def _matrix_soft_nms(
     processing order is fixed (higher-scored masks always processed
     first, their scores unchanged).
 
+    Like :func:`_matrix_nms`, a dummy entry is appended to avoid
+    empty-tensor issues during ONNX tracing.
+
     Args:
         scores: Confidence scores ``[N]``.
         iou_matrix: Pairwise IoU matrix ``[N, N]``.
@@ -252,17 +268,23 @@ def _matrix_soft_nms(
     Returns:
         Tuple of (kept_indices, decayed_scores_for_kept) in original ordering.
     """
-    order = torch.argsort(scores, descending=True)
+    n = scores.shape[0]
 
-    sorted_iou = iou_matrix[order][:, order]  # [N, N]
-    sorted_scores = scores[order]  # [N]
+    # Pad with a dummy entry to guarantee at least 1 row
+    padded_scores = torch.cat([scores, torch.full((1,), -1e9, device=scores.device)])
+    padded_iou = torch.nn.functional.pad(iou_matrix, [0, 1, 0, 1], value=0.0)
+
+    order = torch.argsort(padded_scores, descending=True)
+
+    sorted_iou = padded_iou[order][:, order]  # [N+1, N+1]
+    sorted_scores = padded_scores[order]  # [N+1]
 
     # Lower-triangular mask (row i sees columns 0..i-1)
     lower_tri = torch.ones_like(sorted_iou).tril(diagonal=-1)
 
     # Sum of IoU^2 with all higher-scored masks
-    iou_sq = sorted_iou * sorted_iou  # [N, N]
-    decay_sum = (iou_sq * lower_tri).sum(dim=1)  # [N]
+    iou_sq = sorted_iou * sorted_iou  # [N+1, N+1]
+    decay_sum = (iou_sq * lower_tri).sum(dim=1)  # [N+1]
 
     # Gaussian decay: exp(-sum / sigma)
     decay = torch.exp(-decay_sum / sigma)
@@ -270,10 +292,12 @@ def _matrix_soft_nms(
 
     keep_sorted = decayed > score_threshold
 
+    # Map back to original indices and remove the dummy entry
     kept_original = order[keep_sorted]
     kept_scores = decayed[keep_sorted]
 
-    return kept_original, kept_scores
+    real_mask = kept_original < n
+    return kept_original[real_mask], kept_scores[real_mask]
 
 
 class MaskNMS(PostProcessor):
@@ -312,7 +336,7 @@ class MaskNMS(PostProcessor):
         Returns:
             Filtered (masks, scores, labels).
         """
-        if masks.size(0) <= 1:
+        if not torch.onnx.is_in_onnx_export() and masks.size(0) <= 1:
             return masks, scores, labels
 
         iou_matrix = _pairwise_mask_iou(masks.bool())
@@ -360,7 +384,7 @@ class BoxNMS(PostProcessor):
         Returns:
             Filtered (masks, scores, labels).
         """
-        if masks.size(0) <= 1:
+        if not torch.onnx.is_in_onnx_export() and masks.size(0) <= 1:
             return masks, scores, labels
 
         boxes = masks_to_boxes_traceable(masks)
@@ -424,7 +448,7 @@ class BoxIoMNMS(PostProcessor):
         Returns:
             Filtered (masks, scores, labels).
         """
-        if masks.size(0) <= 1:
+        if not torch.onnx.is_in_onnx_export() and masks.size(0) <= 1:
             return masks, scores, labels
 
         boxes = masks_to_boxes_traceable(masks)
@@ -506,7 +530,7 @@ class MaskIoMNMS(PostProcessor):
         Returns:
             Filtered (masks, scores, labels).
         """
-        if masks.size(0) <= 1:
+        if not torch.onnx.is_in_onnx_export() and masks.size(0) <= 1:
             return masks, scores, labels
 
         iom_matrix = _pairwise_mask_iom(masks.bool())
@@ -574,7 +598,7 @@ class SoftNMS(PostProcessor):
         Returns:
             Filtered (masks, scores, labels) with decayed scores.
         """
-        if masks.size(0) <= 1:
+        if not torch.onnx.is_in_onnx_export() and masks.size(0) <= 1:
             return masks, scores, labels
 
         iou_matrix = _pairwise_mask_iou(masks.bool())

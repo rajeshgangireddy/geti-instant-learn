@@ -5,12 +5,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import torch
 
 from instantlearn.components.postprocessing.base import PostProcessor
-
-if TYPE_CHECKING:
-    import torch
 
 
 class ScoreFilter(PostProcessor):
@@ -48,7 +45,7 @@ class ScoreFilter(PostProcessor):
         Returns:
             Filtered (masks, scores, labels).
         """
-        if masks.size(0) == 0:
+        if not torch.onnx.is_in_onnx_export() and masks.size(0) == 0:
             return masks, scores, labels
 
         keep = scores > self.min_score
@@ -87,7 +84,7 @@ class MinimumAreaFilter(PostProcessor):
         Returns:
             Filtered (masks, scores, labels).
         """
-        if masks.size(0) == 0:
+        if not torch.onnx.is_in_onnx_export() and masks.size(0) == 0:
             return masks, scores, labels
 
         areas = masks.bool().flatten(1).sum(dim=1)  # [N]

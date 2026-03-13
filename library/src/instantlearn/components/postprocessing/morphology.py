@@ -12,14 +12,10 @@ Morphological closing fills small holes inside masks.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
+import torch
 from torch.nn import functional
 
 from instantlearn.components.postprocessing.base import PostProcessor
-
-if TYPE_CHECKING:
-    import torch
 
 
 def _erode(masks: torch.Tensor, kernel_size: int) -> torch.Tensor:
@@ -96,7 +92,7 @@ class MorphologicalOpening(PostProcessor):
         Returns:
             Cleaned (masks, scores, labels). Mask count is unchanged.
         """
-        if masks.size(0) == 0:
+        if not torch.onnx.is_in_onnx_export() and masks.size(0) == 0:
             return masks, scores, labels
 
         float_masks = masks.float()
@@ -145,7 +141,7 @@ class MorphologicalClosing(PostProcessor):
         Returns:
             Cleaned (masks, scores, labels). Mask count is unchanged.
         """
-        if masks.size(0) == 0:
+        if not torch.onnx.is_in_onnx_export() and masks.size(0) == 0:
             return masks, scores, labels
 
         float_masks = masks.float()
