@@ -1,6 +1,8 @@
 from pathlib import Path
 from time import time
 
+import torch
+import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import numpy as np
 import openvino
@@ -16,7 +18,7 @@ ref_sample = Sample(
 )
 
 # fit the model
-device = "cuda"
+device = "cuda" if torch.cuda.is_available() else "cpu"
 model = Matcher(device=device)
 model.fit(ref_sample)
 
@@ -28,10 +30,9 @@ target_sample = Sample(image_path=str(root_dir / "000000173279.jpg"))
 tic = time()
 predictions = model.predict(target_sample)
 pt_masks = predictions[0]["pred_masks"].cpu().numpy()
-print(
-    f"PyTorch Inference: {pt_masks.shape[0]} masks, scores={predictions[0]['pred_scores'].cpu().numpy().round(3)}, labels={predictions[0]['pred_labels'].cpu().numpy()}",
-)
-print(f"PyTorch Inference time: {time() - tic:.2f} seconds")
+pt_time = time() - tic
+pt_scores = predictions[0]["pred_scores"].cpu().numpy().round(3)
+pt_labels = predictions[0]["pred_labels"].cpu().numpy()
 
 # Export to OpenVINO
 
@@ -49,9 +50,6 @@ input_data = target_sample.image.numpy()
 # input_data.shape is (3, 426, 640)
 # expected is [1,3,512,512]
 
-import torch
-import torch.nn.functional as F
-
 expected_shape = compiled_model.input(0).shape
 if input_data.shape != tuple(expected_shape[1:]):
     tensor = torch.from_numpy(input_data)
@@ -60,18 +58,24 @@ if input_data.shape != tuple(expected_shape[1:]):
 
 tic = time()
 outputs = compiled_model(input_data)
-print(f"OpenVINO GPU Inference time: {time() - tic:.2f} seconds")
-ov_gpu_masks, scores, labels = outputs.values()
-print(f"OpenVINO GPU Inference: {ov_gpu_masks.shape[0]} masks, scores={scores.round(3)}, labels={labels}")
+ov_gpu_time = time() - tic
+ov_gpu_masks, ov_gpu_scores, ov_gpu_labels = outputs.values()
 
 
 # do the same but on CPU
 compiled_model = core.compile_model(ov_model, "CPU")
 tic = time()
 outputs = compiled_model(input_data)
-print(f"OpenVINO CPU Inference time: {time() - tic:.2f} seconds")
-ov_cpu_masks, scores, labels = outputs.values()
-print(f"OpenVINO CPU Inference: {ov_cpu_masks.shape[0]} masks, scores={scores.round(3)}, labels={labels}")
+ov_cpu_time = time() - tic
+ov_cpu_masks, ov_cpu_scores, ov_cpu_labels = outputs.values()
+
+# Print all inference results together
+print(f"PyTorch ({device}) Inference: {pt_masks.shape[0]} masks, scores={pt_scores}, labels={pt_labels}")
+print(f"PyTorch ({device}) Inference time: {pt_time:.2f} seconds")
+print(f"OpenVINO GPU Inference: {ov_gpu_masks.shape[0]} masks, scores={ov_gpu_scores.round(3)}, labels={ov_gpu_labels}")
+print(f"OpenVINO GPU Inference time: {ov_gpu_time:.2f} seconds")
+print(f"OpenVINO CPU Inference: {ov_cpu_masks.shape[0]} masks, scores={ov_cpu_scores.round(3)}, labels={ov_cpu_labels}")
+print(f"OpenVINO CPU Inference time: {ov_cpu_time:.2f} seconds")
 
 
 def _combine_masks(masks: np.ndarray) -> np.ndarray:
