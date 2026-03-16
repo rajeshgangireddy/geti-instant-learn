@@ -9,10 +9,10 @@ from instantlearn.data import Sample
 from instantlearn.models import Matcher
 
 # reference image
-root_dir = "/home/rgangire/workspace/code/GetiPrompt/geti-prompt/library/examples/assets/coco/"
+root_dir = Path("examples/assets/coco")
 ref_sample = Sample(
-    image_path=str(Path(root_dir) / "000000286874.jpg"),
-    mask_paths=str(Path(root_dir) / "000000286874_mask.png"),
+    image_path=str(root_dir / "000000286874.jpg"),
+    mask_paths=str(root_dir / "000000286874_mask.png"),
 )
 
 # fit the model
@@ -21,7 +21,7 @@ model = Matcher(device=device)
 model.fit(ref_sample)
 
 # Target sample
-target_sample = Sample(image_path=str(Path(root_dir) / "000000173279.jpg"))
+target_sample = Sample(image_path=str(root_dir / "000000173279.jpg"))
 # predict
 
 
@@ -89,6 +89,6 @@ for ax, title, masks in zip(axes, titles, all_masks, strict=False):
     ax.axis("off")
 
 fig.tight_layout()
-out_path = Path(root_dir) / "masks_comparison.png"
+out_path = root_dir / "masks_comparison.png"
 fig.savefig(out_path, dpi=150)
 print(f"Mask comparison saved to {out_path}")
