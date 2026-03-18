@@ -3,13 +3,13 @@
 
 """This model uses a zero-shot object detector (from Huggingface) to generate boxes for SAM."""
 
-import torch
+import time
 
 from instantlearn.components import SamDecoder
 from instantlearn.components.sam import load_sam_model
 from instantlearn.data.base.batch import Batch, Collatable
 from instantlearn.data.base.sample import Sample
-from instantlearn.models.base import Model
+from instantlearn.models.base import InferenceResult, Model
 from instantlearn.utils.constants import SAMModelName
 
 from .grounded import GroundingModel, TextToBoxPromptGenerator
@@ -77,7 +77,7 @@ class GroundedSAM(Model):
                 if category not in self.category_mapping:
                     self.category_mapping[category] = int(category_id)
 
-    def predict(self, target: Collatable) -> list[dict[str, torch.Tensor]]:
+    def predict(self, target: Collatable) -> InferenceResult:
         """Perform inference step on the target images.
 
         Args:
@@ -89,25 +89,30 @@ class GroundedSAM(Model):
                 - list[str] | list[Path]: Multiple image paths
 
         Returns:
-            A list of predictions, one per sample. Each prediction contains:
-                "pred_masks": torch.Tensor of shape [num_masks, H, W]
-                "pred_scores": torch.Tensor of shape [num_masks]
-                "pred_labels": torch.Tensor of shape [num_masks]
-                "pred_boxes": torch.Tensor of shape [num_boxes, 5] with [x1, y1, x2, y2, score]
+            InferenceResult with predictions and per-component timing.
         """
+        wall_start = time.perf_counter()
         target_batch = Batch.collate(target)
+
         # Generate box prompts (tensor format)
-        box_prompts, category_ids = self.prompt_generator(
-            target_batch.images,
-            self.category_mapping,
-        )
+        with self._time_component("grounding") as t_ground:
+            box_prompts, category_ids = self.prompt_generator(
+                target_batch.images,
+                self.category_mapping,
+            )
 
         # Filter box prompts
-        box_prompts = self.prompt_filter(box_prompts)
+        with self._time_component("box_filter") as t_filter:
+            box_prompts = self.prompt_filter(box_prompts)
 
         # Decode masks
-        return self.segmenter(
-            target_batch.images,
-            category_ids,
-            box_prompts=box_prompts,
-        )
+        with self._time_component("decoder") as t_dec:
+            predictions = self.segmenter(
+                target_batch.images,
+                category_ids,
+                box_prompts=box_prompts,
+            )
+
+        total_ms = (time.perf_counter() - wall_start) * 1000.0
+        timing = self._build_timing([t_ground, t_filter, t_dec], total_ms)
+        return InferenceResult(predictions=predictions, timing=timing)

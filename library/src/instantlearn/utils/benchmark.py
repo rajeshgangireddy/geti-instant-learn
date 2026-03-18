@@ -7,9 +7,12 @@ import shutil
 from argparse import Namespace
 from logging import getLogger
 from pathlib import Path
+from typing import Any
 
 import polars as pl
 import torch
+from torchmetrics import Metric
+from torchmetrics.segmentation import DiceScore, MeanIoU
 
 from instantlearn.data.base import Batch
 from instantlearn.data.lvis import LVISAnnotationMode
@@ -18,6 +21,8 @@ from instantlearn.models.grounded_sam import GroundingModel
 from instantlearn.utils.constants import DatasetName, ModelName, SAMModelName
 
 logger = getLogger("Geti Instant Learn")
+
+AVAILABLE_METRICS = ("iou", "dice", "precision", "recall")
 
 # Maps each model to its required LVIS annotation mode.
 # SEMANTIC: merge instances into one mask per category (Matcher, SoftMatcher, etc.)
@@ -31,6 +36,106 @@ MODEL_ANNOTATION_MODES: dict[ModelName, LVISAnnotationMode] = {
     ModelName.SAM3_CLASSIC: LVISAnnotationMode.SEMANTIC,
     ModelName.SAM3_VISUAL: LVISAnnotationMode.INSTANCE,
 }
+
+
+class PixelPrecisionRecall(Metric):
+    """Per-class pixel-level precision and recall for segmentation.
+
+    Accumulates true positives, false positives, and false negatives
+    per class across update() calls. compute() returns per-class precision
+    and recall tensors.
+    """
+
+    def __init__(self, num_classes: int, **kwargs: Any) -> None:  # noqa: ANN401
+        """Initialize with the number of segmentation classes."""
+        super().__init__(**kwargs)
+        self.num_classes = num_classes
+        self.add_state("tp", default=torch.zeros(num_classes, dtype=torch.long), dist_reduce_fx="sum")
+        self.add_state("fp", default=torch.zeros(num_classes, dtype=torch.long), dist_reduce_fx="sum")
+        self.add_state("fn", default=torch.zeros(num_classes, dtype=torch.long), dist_reduce_fx="sum")
+
+    def update(self, preds: torch.Tensor, target: torch.Tensor) -> None:
+        """Update with one-hot boolean tensors of shape (1, C, H, W)."""
+        # Squeeze batch dim if present
+        if preds.ndim == 4:
+            preds = preds.squeeze(0)
+        if target.ndim == 4:
+            target = target.squeeze(0)
+        # preds, target: (C, H, W) boolean
+        for c in range(self.num_classes):
+            p = preds[c].bool()
+            t = target[c].bool()
+            self.tp[c] += (p & t).sum()
+            self.fp[c] += (p & ~t).sum()
+            self.fn[c] += (~p & t).sum()
+
+    def compute(self) -> dict[str, torch.Tensor]:
+        """Compute per-class precision and recall.
+
+        Returns:
+            Dict with "precision" and "recall" tensors of shape (num_classes,).
+        """
+        precision = self.tp.float() / (self.tp + self.fp).float().clamp(min=1)
+        recall = self.tp.float() / (self.tp + self.fn).float().clamp(min=1)
+        return {"precision": precision, "recall": recall}
+
+
+def create_metrics(
+    num_classes: int,
+    requested_metrics: list[str],
+    device: torch.device,
+) -> dict[str, Metric]:
+    """Create metric instances based on requested metric names.
+
+    Args:
+        num_classes: Number of classes in the dataset.
+        requested_metrics: List of metric names (e.g., ["iou", "dice", "precision", "recall"]).
+        device: Device to place metric state on.
+
+    Returns:
+        Dict mapping metric name to metric instance.
+    """
+    metrics: dict[str, Metric] = {}
+    if "iou" in requested_metrics:
+        metrics["iou"] = MeanIoU(
+            num_classes=num_classes,
+            include_background=True,
+            per_class=True,
+        ).to(device)
+    if "dice" in requested_metrics:
+        metrics["dice"] = DiceScore(
+            num_classes=num_classes,
+            include_background=True,
+            average="none",
+            input_format="one-hot",
+        ).to(device)
+    if "precision" in requested_metrics or "recall" in requested_metrics:
+        metrics["precision_recall"] = PixelPrecisionRecall(
+            num_classes=num_classes,
+        ).to(device)
+    return metrics
+
+
+def parse_metrics_arg(metrics_arg: str) -> list[str]:
+    """Parse the --metrics CLI argument into a list of metric names.
+
+    Args:
+        metrics_arg: Comma-separated metric names or "all".
+
+    Returns:
+        List of validated metric names.
+
+    Raises:
+        ValueError: If an unknown metric name is provided.
+    """
+    if metrics_arg.lower() == "all":
+        return list(AVAILABLE_METRICS)
+    names = [m.strip().lower() for m in metrics_arg.split(",")]
+    for name in names:
+        if name not in AVAILABLE_METRICS:
+            msg = f"Unknown metric '{name}'. Available: {AVAILABLE_METRICS}"
+            raise ValueError(msg)
+    return names
 
 
 def prepare_output_directory(output_path: str, overwrite: bool) -> Path:
@@ -243,6 +348,7 @@ def load_model(sam: SAMModelName, model_name: ModelName, args: Namespace) -> Mod
         case ModelName.SAM3_CLASSIC:
             return SAM3(
                 confidence_threshold=args.confidence_threshold,
+                resolution=getattr(args, "resolution", 1008),
                 precision=args.precision,
                 compile_models=args.compile_models,
                 device=args.device,
@@ -251,6 +357,7 @@ def load_model(sam: SAMModelName, model_name: ModelName, args: Namespace) -> Mod
         case ModelName.SAM3_VISUAL:
             return SAM3(
                 confidence_threshold=args.confidence_threshold,
+                resolution=getattr(args, "resolution", 1008),
                 precision=args.precision,
                 compile_models=args.compile_models,
                 device=args.device,

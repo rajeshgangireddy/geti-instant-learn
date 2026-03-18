@@ -76,6 +76,20 @@ class FrameTrace:
         if span is not None:
             span.end_ms = self._now_ms()
 
+    def record_model_component(self, component: str, duration_ms: float) -> None:
+        """Record a pre-measured model sub-component timing as a completed span.
+
+        Used to inject per-component timings reported by the library's model
+        ``InferenceTiming`` into the trace without start/end bookkeeping.
+
+        Args:
+            component: Sub-component name (e.g., "encoder", "decoder").
+            duration_ms: Duration in milliseconds.
+        """
+        now = self._now_ms()
+        span = ComponentSpan(start_ms=now - duration_ms, component=f"model.{component}", end_ms=now)
+        self.spans.append(span)
+
     def format_log(self) -> str:
         """Format the full trace as a single log line.
 

@@ -4,6 +4,7 @@
 """SAM3 model for text and visual prompting."""
 
 import logging
+import time
 from collections import defaultdict
 from enum import Enum
 from itertools import zip_longest
@@ -14,7 +15,7 @@ from transformers import CLIPTokenizerFast
 
 from instantlearn.data.base.batch import Batch, Collatable
 from instantlearn.data.base.sample import Sample
-from instantlearn.models.base import Model
+from instantlearn.models.base import InferenceResult, InferenceTiming, Model
 from instantlearn.utils import precision_to_torch_dtype
 
 from .model import Sam3Model
@@ -214,15 +215,23 @@ class SAM3(Model):
                 - list[Sample]: A list of reference samples
                 - Batch: A batch of reference samples
         """
+        wall_start = time.perf_counter()
         reference_batch = Batch.collate(reference)
 
         if self.prompt_mode == Sam3PromptMode.CLASSIC:
             self._fit_classic(reference_batch)
+            total_ms = (time.perf_counter() - wall_start) * 1000.0
+            self.last_fit_timing = InferenceTiming(component_times={"category_mapping": total_ms}, total_ms=total_ms)
         else:
             self._fit_visual_exemplar(reference_batch)
+            total_ms = (time.perf_counter() - wall_start) * 1000.0
+            self.last_fit_timing = InferenceTiming(
+                component_times={"visual_exemplar_encoding": total_ms},
+                total_ms=total_ms,
+            )
 
     @torch.inference_mode()
-    def predict(self, target: Collatable) -> list[dict[str, torch.Tensor]]:
+    def predict(self, target: Collatable) -> InferenceResult:
         """Perform inference on target images.
 
         In CLASSIC mode, processes text/box prompts per target image.
@@ -237,8 +246,7 @@ class SAM3(Model):
                 - list[str] | list[Path]: Multiple image paths
 
         Returns:
-            List of prediction dicts per image with 'pred_masks', 'pred_boxes',
-            'pred_labels'.
+            InferenceResult with predictions and per-component timing.
         """
         if self.prompt_mode == Sam3PromptMode.VISUAL_EXEMPLAR:
             return self._predict_visual_exemplar(target)
@@ -376,13 +384,13 @@ class SAM3(Model):
         category_coords: dict[int, list[torch.Tensor]] = defaultdict(list)
         prompts = bboxes if has_bboxes else points
 
-        for prompt, category, cat_id in zip(prompts, categories, category_ids, strict=True):
+        for prompt, category, raw_cat_id in zip(prompts, categories, category_ids, strict=True):
             if has_bboxes:
                 input_boxes, _ = self.prompt_preprocessor(original_sizes, input_boxes=prompt)
                 coord = input_boxes[..., :2]  # box center (1, 1, 2)
             else:
                 _, coord = self.prompt_preprocessor(original_sizes, input_points=prompt)
-            cat_id = int(cat_id)
+            cat_id = int(raw_cat_id)
             category_coords[cat_id].append(coord)
             category_text_map[cat_id] = category
 
@@ -469,18 +477,25 @@ class SAM3(Model):
 
     # -- Predict internals --
 
-    def _predict_classic(self, target: Collatable) -> list[dict[str, torch.Tensor]]:
+    def _predict_classic(self, target: Collatable) -> InferenceResult:
         """Classic SAM3 prediction with per-image text/box/point prompts.
 
         Args:
             target: Target data to infer.
 
         Returns:
-            List of prediction dicts per image.
+            InferenceResult with predictions and per-component timing.
         """
+        wall_start = time.perf_counter()
         target_batch = Batch.collate(target)
         results = []
         samples = target_batch.samples
+
+        # Accumulators for component timing across samples
+        preprocess_ms = 0.0
+        vision_ms = 0.0
+        model_forward_ms = 0.0
+        postprocess_ms = 0.0
 
         # Use stored categories from fit() if available, otherwise use per-sample
         use_fitted_categories = self.category_mapping is not None
@@ -494,8 +509,12 @@ class SAM3(Model):
             # Preprocess image
             image_tensor = sample.image.unsqueeze(0) if sample.image.ndim == 3 else sample.image
             with torch.no_grad():
-                pixel_values, original_sizes = self.image_preprocessor(image_tensor.to(self.device))
-                vision_embeds = self.model.get_vision_features(pixel_values)
+                with self._time_component("preprocessor") as t_pre:
+                    pixel_values, original_sizes = self.image_preprocessor(image_tensor.to(self.device))
+                with self._time_component("vision_encoder") as t_vis:
+                    vision_embeds = self.model.get_vision_features(pixel_values)
+            preprocess_ms += t_pre.elapsed_ms
+            vision_ms += t_vis.elapsed_ms
 
             # Determine text prompts and category IDs
             if use_fitted_categories:
@@ -509,61 +528,115 @@ class SAM3(Model):
                 if num_visual_prompts and len(texts) != num_visual_prompts:
                     texts = ["visual"] * num_visual_prompts
 
-            all_masks: list[torch.Tensor] = []
-            all_boxes: list[torch.Tensor] = []
-            all_labels: list[torch.Tensor] = []
-
-            for text, bbox, point, cat_id in zip_longest(texts, bboxes, points, category_ids, fillvalue=None):
-                # Tokenize text prompt (default to "visual" for visual-only prompts)
-                text_inputs = self.tokenizer(
-                    [text or "visual"],
-                    return_tensors="pt",
-                    padding="max_length",
-                    max_length=32,
-                )
-                input_ids = text_inputs.input_ids.to(self.device)
-                attention_mask = text_inputs.attention_mask.to(self.device)
-
-                # Prepare box inputs if bbox is provided (xyxy format)
-                input_boxes = None
-                input_boxes_labels = None
-                if bbox is not None and len(bbox):
-                    input_boxes, _ = self.prompt_preprocessor(original_sizes, input_boxes=bbox)
-                    input_boxes_labels = torch.ones((1, 1), dtype=torch.long, device=self.device)
-
-                # Prepare point inputs if point is provided (xy format)
-                input_points = None
-                input_points_labels = None
-                if point is not None and len(point):
-                    _, input_points = self.prompt_preprocessor(original_sizes, input_points=point)
-                    input_points_labels = torch.ones((1, 1), dtype=torch.long, device=self.device)
-
-                with torch.no_grad():
-                    outputs = self.model(
-                        vision_embeds=vision_embeds,
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        input_boxes=input_boxes,
-                        input_boxes_labels=input_boxes_labels,
-                        input_points=input_points,
-                        input_points_labels=input_points_labels,
-                    )
-
-                # Postprocess
-                result = self.postprocessor(outputs, target_sizes=[img_size])
-                boxes_with_scores = torch.cat(
-                    [result[0]["boxes"], result[0]["scores"].unsqueeze(1)],
-                    dim=1,
-                )
-                all_masks.append(result[0]["masks"].cpu())
-                all_boxes.append(boxes_with_scores.cpu())
-                all_labels.append(torch.full((len(result[0]["boxes"]),), cat_id, dtype=torch.int64))
+            all_masks, all_boxes, all_labels, fwd_ms, post_ms = self._classic_forward_all_prompts(
+                vision_embeds,
+                original_sizes,
+                img_size,
+                texts,
+                bboxes,
+                points,
+                category_ids,
+            )
+            model_forward_ms += fwd_ms
+            postprocess_ms += post_ms
 
             results.append(self._aggregate_results(all_masks, all_boxes, all_labels, img_size))
 
-        return results
+        total_ms = (time.perf_counter() - wall_start) * 1000.0
+        timing = InferenceTiming(
+            component_times={
+                "preprocessor": preprocess_ms,
+                "vision_encoder": vision_ms,
+                "model_forward": model_forward_ms,
+                "postprocessor": postprocess_ms,
+            },
+            total_ms=total_ms,
+        )
+        return InferenceResult(predictions=results, timing=timing)
 
-    def _predict_visual_exemplar(self, target: Collatable) -> list[dict[str, torch.Tensor]]:
+    def _classic_forward_all_prompts(
+        self,
+        vision_embeds: torch.Tensor,
+        original_sizes: torch.Tensor,
+        img_size: tuple[int, int],
+        texts: list[str],
+        bboxes: list,
+        points: list,
+        category_ids: list,
+    ) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor], float, float]:
+        """Run model forward and postprocess for each prompt in a single image.
+
+        Args:
+            vision_embeds: Precomputed vision embeddings for the image.
+            original_sizes: Original image size tensor for the preprocessor.
+            img_size: (height, width) of the image for postprocessing.
+            texts: Text prompts, one per object.
+            bboxes: Bounding box prompts (may be shorter or empty).
+            points: Point prompts (may be shorter or empty).
+            category_ids: Category IDs aligned with prompts.
+
+        Returns:
+            A 5-tuple (all_masks, all_boxes, all_labels, model_forward_ms, postprocess_ms).
+        """
+        all_masks: list[torch.Tensor] = []
+        all_boxes: list[torch.Tensor] = []
+        all_labels: list[torch.Tensor] = []
+        model_forward_ms = 0.0
+        postprocess_ms = 0.0
+
+        for text, bbox, point, cat_id in zip_longest(texts, bboxes, points, category_ids, fillvalue=None):
+            # Tokenize text prompt (default to "visual" for visual-only prompts)
+            text_inputs = self.tokenizer(
+                [text or "visual"],
+                return_tensors="pt",
+                padding="max_length",
+                max_length=32,
+            )
+            input_ids = text_inputs.input_ids.to(self.device)
+            attention_mask = text_inputs.attention_mask.to(self.device)
+
+            # Prepare box inputs if bbox is provided (xyxy format)
+            input_boxes = None
+            input_boxes_labels = None
+            if bbox is not None and len(bbox):
+                input_boxes, _ = self.prompt_preprocessor(original_sizes, input_boxes=bbox)
+                input_boxes_labels = torch.ones((1, 1), dtype=torch.long, device=self.device)
+
+            # Prepare point inputs if point is provided (xy format)
+            input_points = None
+            input_points_labels = None
+            if point is not None and len(point):
+                _, input_points = self.prompt_preprocessor(original_sizes, input_points=point)
+                input_points_labels = torch.ones((1, 1), dtype=torch.long, device=self.device)
+
+            with torch.no_grad(), self._time_component("model_forward") as t_fwd:
+                outputs = self.model(
+                    vision_embeds=vision_embeds,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    input_boxes=input_boxes,
+                    input_boxes_labels=input_boxes_labels,
+                    input_points=input_points,
+                    input_points_labels=input_points_labels,
+                )
+            model_forward_ms += t_fwd.elapsed_ms
+
+            # Postprocess
+            with self._time_component("postprocessor") as t_post:
+                result = self.postprocessor(outputs, target_sizes=[img_size])
+            postprocess_ms += t_post.elapsed_ms
+
+            boxes_with_scores = torch.cat(
+                [result[0]["boxes"], result[0]["scores"].unsqueeze(1)],
+                dim=1,
+            )
+            all_masks.append(result[0]["masks"].cpu())
+            all_boxes.append(boxes_with_scores.cpu())
+            all_labels.append(torch.full((len(result[0]["boxes"]),), cat_id, dtype=torch.int64))
+
+        return all_masks, all_boxes, all_labels, model_forward_ms, postprocess_ms
+
+    def _predict_visual_exemplar(self, target: Collatable) -> InferenceResult:
         """Visual exemplar prediction using cached geometry features from fit().
 
         For each target image, reuses the cached exemplar geometry features
@@ -573,7 +646,7 @@ class SAM3(Model):
             target: Target data to infer.
 
         Returns:
-            List of prediction dicts per image.
+            InferenceResult with predictions and per-component timing.
 
         Raises:
             RuntimeError: If fit() has not been called.
@@ -582,8 +655,14 @@ class SAM3(Model):
             msg = "No cached exemplar features. Call fit() with reference images and bboxes first."
             raise RuntimeError(msg)
 
+        wall_start = time.perf_counter()
         target_batch = Batch.collate(target)
         results = []
+
+        preprocess_ms = 0.0
+        vision_ms = 0.0
+        model_forward_ms = 0.0
+        postprocess_ms = 0.0
 
         for sample in target_batch.samples:
             img_size = sample.image.shape[-2:]
@@ -591,8 +670,12 @@ class SAM3(Model):
             # Preprocess target image
             image_tensor = sample.image.unsqueeze(0) if sample.image.ndim == 3 else sample.image
             with torch.no_grad():
-                pixel_values, _ = self.image_preprocessor(image_tensor.to(self.device))
-                vision_embeds = self.model.get_vision_features(pixel_values)
+                with self._time_component("preprocessor") as t_pre:
+                    pixel_values, _ = self.image_preprocessor(image_tensor.to(self.device))
+                with self._time_component("vision_encoder") as t_vis:
+                    vision_embeds = self.model.get_vision_features(pixel_values)
+            preprocess_ms += t_pre.elapsed_ms
+            vision_ms += t_vis.elapsed_ms
 
             all_masks: list[torch.Tensor] = []
             all_boxes: list[torch.Tensor] = []
@@ -607,16 +690,21 @@ class SAM3(Model):
                 self.exemplar_category_ids,
                 strict=True,
             ):
-                outputs = self.model(
-                    vision_embeds=vision_embeds,
-                    text_embeds=text_feats,
-                    attention_mask=text_mask.long(),
-                    precomputed_geometry_features=geo_feats,
-                    precomputed_geometry_mask=geo_mask,
-                )
+                with self._time_component("model_forward") as t_fwd:
+                    outputs = self.model(
+                        vision_embeds=vision_embeds,
+                        text_embeds=text_feats,
+                        attention_mask=text_mask.long(),
+                        precomputed_geometry_features=geo_feats,
+                        precomputed_geometry_mask=geo_mask,
+                    )
+                model_forward_ms += t_fwd.elapsed_ms
 
                 # Postprocess
-                result = self.postprocessor(outputs, target_sizes=[img_size])
+                with self._time_component("postprocessor") as t_post:
+                    result = self.postprocessor(outputs, target_sizes=[img_size])
+                postprocess_ms += t_post.elapsed_ms
+
                 boxes_with_scores = torch.cat(
                     [result[0]["boxes"], result[0]["scores"].unsqueeze(1)],
                     dim=1,
@@ -627,7 +715,17 @@ class SAM3(Model):
 
             results.append(self._aggregate_results(all_masks, all_boxes, all_labels, img_size))
 
-        return results
+        total_ms = (time.perf_counter() - wall_start) * 1000.0
+        timing = InferenceTiming(
+            component_times={
+                "preprocessor": preprocess_ms,
+                "vision_encoder": vision_ms,
+                "model_forward": model_forward_ms,
+                "postprocessor": postprocess_ms,
+            },
+            total_ms=total_ms,
+        )
+        return InferenceResult(predictions=results, timing=timing)
 
     # -- Utilities --
 

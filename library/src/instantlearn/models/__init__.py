@@ -7,7 +7,7 @@ Each model is organized in its own self-contained folder with model-specific com
 Shared components remain in the top-level components/ directory.
 """
 
-from .base import Model
+from .base import InferenceResult, InferenceTiming, Model
 from .dinotxt import DinoTxtZeroShotClassification
 from .grounded_sam import GroundedSAM
 from .matcher import Matcher
@@ -19,6 +19,8 @@ __all__ = [
     "SAM3",
     "DinoTxtZeroShotClassification",
     "GroundedSAM",
+    "InferenceResult",
+    "InferenceTiming",
     "Matcher",
     "Model",
     "PerDino",

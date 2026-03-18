@@ -8,6 +8,7 @@ Sample dataclass with manual DataFrame management.
 """
 
 import copy
+import random
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 
@@ -285,7 +286,7 @@ class Dataset(TorchDataset, ABC):
 
         # Create new dataset with filtered DataFrame
         new_dataset = copy.deepcopy(self)
-        new_dataset._df = reference_df
+        new_dataset.df = reference_df
         return new_dataset
 
     def get_target_dataset(self, category: str | None = None) -> "Dataset":
@@ -294,8 +295,60 @@ class Dataset(TorchDataset, ABC):
 
         # Create new dataset with filtered DataFrame
         new_dataset = copy.deepcopy(self)
-        new_dataset._df = target_df
+        new_dataset.df = target_df
         return new_dataset
+
+    def shuffle_references(self, seed: int, prior_index: int) -> None:
+        """Re-assign reference/target splits by shuffling samples per category.
+
+        For each category, all rows that contain the category are collected
+        and shuffled deterministically using ``seed + prior_index``.
+        The first ``n_shots`` rows become references (for that category's
+        instances) and the remaining rows become targets.
+
+        This modifies the dataset in place so that subsequent calls to
+        ``get_reference_dataset`` / ``get_target_dataset`` reflect the new
+        assignment.
+
+        Args:
+            seed: Base random seed for reproducibility.
+            prior_index: Prior/run index; combined with *seed* to produce
+                a unique permutation per run.
+        """
+        current_df = self.df
+        # Work on Python lists for mutability
+        is_ref_col: list[list[bool]] = current_df["is_reference"].to_list()
+        n_shot_col: list[list[int]] = current_df["n_shot"].to_list()
+        categories_col: list[list[str]] = current_df["categories"].to_list()
+
+        # Reset all to target first
+        for row_idx in range(len(is_ref_col)):
+            is_ref_col[row_idx] = [False] * len(is_ref_col[row_idx])
+            n_shot_col[row_idx] = [-1] * len(n_shot_col[row_idx])
+
+        # For each category, shuffle and pick new references
+        for category in self.categories:
+            # Collect (row_idx, instance_idx) pairs for this category
+            candidates: list[tuple[int, int]] = []
+            for row_idx, cats in enumerate(categories_col):
+                for inst_idx, cat in enumerate(cats):
+                    if cat == category:
+                        candidates.append((row_idx, inst_idx))
+
+            # Deterministic shuffle per category + prior
+            rng = random.Random(seed + prior_index)  # noqa: S311
+            rng.shuffle(candidates)
+
+            # First n_shots become reference
+            for shot_num, (row_idx, inst_idx) in enumerate(candidates[: self.n_shots]):
+                is_ref_col[row_idx][inst_idx] = True
+                n_shot_col[row_idx][inst_idx] = shot_num
+
+        # Write back to DataFrame
+        self.df = current_df.with_columns(
+            pl.Series("is_reference", is_ref_col),
+            pl.Series("n_shot", n_shot_col),
+        )
 
     def subsample(self, indices: Sequence[int], inplace: bool = False) -> "Dataset":
         """Create a subset of the dataset using the provided indices.
@@ -318,7 +371,7 @@ class Dataset(TorchDataset, ABC):
         subset_df = self.df[list(indices)]
 
         dataset = self if inplace else copy.deepcopy(self)
-        dataset._df = subset_df
+        dataset.df = subset_df
         return dataset
 
     def __add__(self, other_dataset: "Dataset") -> "Dataset":

@@ -12,12 +12,12 @@ import polars as pl
 import torch
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 from torch.utils.data import DataLoader
-from torchmetrics.segmentation import MeanIoU
+from torchmetrics import Metric
 
 from instantlearn.data import Dataset, LVISDataset, PerSegDataset
 from instantlearn.data.base import Batch
 from instantlearn.data.lvis import LVISAnnotationMode
-from instantlearn.models import SAM3, Model
+from instantlearn.models import SAM3, InferenceResult, Model
 from instantlearn.utils import setup_logger
 from instantlearn.utils.args import get_arguments, parse_experiment_args
 from instantlearn.utils.benchmark import (
@@ -25,7 +25,9 @@ from instantlearn.utils.benchmark import (
     _get_output_path_for_experiment,
     _save_results,
     convert_masks_to_one_hot_tensor,
+    create_metrics,
     load_model,
+    parse_metrics_arg,
     prepare_output_directory,
 )
 from instantlearn.utils.constants import get_category_presets
@@ -40,7 +42,8 @@ def predict_on_category(
     category_name: str,
     priors_batch_index: int,
     visualizer: Visualizer,
-    metrics_calculators: dict[int, MeanIoU],
+    metrics_calculators: dict[int, dict[str, Metric]],
+    predict_timings: list[dict[str, float]],
     progress: Progress,
     batch_size: int,
     device: torch.device,
@@ -54,7 +57,8 @@ def predict_on_category(
         category_name: The current category
         priors_batch_index: The current prior batch
         visualizer: The visualizer for exporting
-        metrics_calculators: The calculator for the metrics
+        metrics_calculators: Per-prior dict of metric-name → Metric instances
+        predict_timings: List to append per-batch timing dicts to
         progress: The progress bar
         batch_size: Batch size for DataLoader
         device: The device to use.
@@ -96,23 +100,32 @@ def predict_on_category(
             for sample in batch:
                 sample.categories = ["visual"]  # Obscure category name to prevent cheating for SAM3
 
-        predictions = model.predict(batch)
+        result: InferenceResult = model.predict(batch)
+
+        # Collect timing if available
+        if result.timing is not None:
+            timing_entry = result.timing.to_dict()
+            timing_entry["category"] = category_name
+            timing_entry["prior_index"] = priors_batch_index
+            timing_entry["batch_size"] = len(batch)
+            predict_timings.append(timing_entry)
 
         # Convert masks to one-hot boolean tensors for torchmetrics
         # Returns lists of tensors, each with shape (C, H, W)
         batch_pred_tensors, batch_gt_tensors = convert_masks_to_one_hot_tensor(
-            predictions=predictions,
+            predictions=result,
             ground_truths=batch,
             num_classes=num_classes,
             category_id_to_index=category_id_to_index,
             device=device,
         )
 
-        # Update IoU metric for each image in the batch
-        # MeanIoU expects (N, C, H, W) but images have different sizes
+        # Update all metrics for each image in the batch
+        # Metrics expect (N, C, H, W) but images have different sizes
         # So we update with (1, C, H, W) for each image
         for pred_tensor, gt_tensor in zip(batch_pred_tensors, batch_gt_tensors, strict=True):
-            metrics_calculators[priors_batch_index].update(pred_tensor, gt_tensor)
+            for metric in metrics_calculators[priors_batch_index].values():
+                metric.update(pred_tensor, gt_tensor)
 
         if visualize:
             # Generate export paths
@@ -126,7 +139,7 @@ def predict_on_category(
             # Visualize predictions and ground truth
             visualizer.visualize(
                 images=batch.images,
-                predictions=predictions,
+                predictions=result.predictions,
                 file_names=file_names,
             )
 
@@ -169,6 +182,7 @@ def predict_on_dataset(
     backbone_name: str,
     number_of_priors_tests: int,
     device: torch.device,
+    requested_metrics: list[str] | None = None,
 ) -> pl.DataFrame:
     """Run predictions on the dataset and evaluate them.
 
@@ -182,10 +196,14 @@ def predict_on_dataset(
         backbone_name: The model name
         number_of_priors_tests: The number of priors to try
         device: The device to use.
+        requested_metrics: List of metric names to compute. Defaults to ["iou"].
 
     Returns:
-        The timing DataFrame
+        The results DataFrame
     """
+    if requested_metrics is None:
+        requested_metrics = ["iou"]
+
     output_path = prepare_output_directory(output_path, args.overwrite)
     msg = f"Output path: {output_path}"
     logger.info(msg)
@@ -194,12 +212,11 @@ def predict_on_dataset(
         output_folder=str(output_path),
         class_map={dataset.get_category_id(category): category for category in dataset.categories},
     )
-    # Keep metrics per prior: dict[prior_index, MeanIoU]
-    # Single MeanIoU instance computes IoU for all classes
-    metrics_calculators: dict[int, MeanIoU] = {}
-
-    time_sum = 0
-    time_count = 0
+    # Keep metrics per prior: dict[prior_index, dict[metric_name, Metric]]
+    metrics_calculators: dict[int, dict[str, Metric]] = {}
+    # Collect per-batch predict timings and per-category fit timings
+    predict_timings: list[dict[str, float]] = []
+    fit_timings: list[dict[str, float]] = []
 
     # Setup Rich Progress
     progress = Progress(
@@ -225,13 +242,18 @@ def predict_on_dataset(
 
             # For now, only use 1 prior batch (can be extended for multiple prior batches)
             for priors_batch_index in range(number_of_priors_tests):
-                # Initialize MeanIoU metric for this prior if needed
+                # Shuffle reference/target assignment for multi-prior runs
+                if number_of_priors_tests > 1:
+                    seed = getattr(args, "seed", 42)
+                    dataset.shuffle_references(seed=seed, prior_index=priors_batch_index)
+
+                # Initialize metrics for this prior if needed
                 if priors_batch_index not in metrics_calculators:
-                    metrics_calculators[priors_batch_index] = MeanIoU(
+                    metrics_calculators[priors_batch_index] = create_metrics(
                         num_classes=len(dataset.categories),
-                        include_background=True,
-                        per_class=True,
-                    ).to(device)
+                        requested_metrics=requested_metrics,
+                        device=device,
+                    )
 
                 # Learn from reference samples
                 learn_from_category(
@@ -239,6 +261,14 @@ def predict_on_dataset(
                     model=model,
                     category_name=category_name,
                 )
+
+                # Collect fit timing
+                if hasattr(model, "last_fit_timing") and model.last_fit_timing is not None:
+                    fit_entry = model.last_fit_timing.to_dict()
+                    fit_entry["category"] = category_name
+                    fit_entry["prior_index"] = priors_batch_index
+                    fit_timings.append(fit_entry)
+
                 progress.update(priors_task, advance=1)
 
                 # Predict on target samples
@@ -249,6 +279,7 @@ def predict_on_dataset(
                     priors_batch_index=priors_batch_index,
                     visualizer=visualizer,
                     metrics_calculators=metrics_calculators,
+                    predict_timings=predict_timings,
                     progress=progress,
                     batch_size=args.batch_size,
                     device=device,
@@ -258,22 +289,81 @@ def predict_on_dataset(
             progress.update(categories_task, advance=1)
 
     # Construct the output metrics file from the calculated metrics
+    return _aggregate_results(
+        metrics_calculators=metrics_calculators,
+        categories=categories,
+        predict_timings=predict_timings,
+        fit_timings=fit_timings,
+        dataset_name=dataset_name,
+        model_name=model_name,
+        backbone_name=backbone_name,
+    )
+
+
+def _compute_per_class_metrics(metric_set: dict[str, Metric], num_categories: int) -> dict[str, list[float]]:
+    """Compute per-class metric values from a set of torchmetric objects.
+
+    Args:
+        metric_set: Mapping from metric name to a computed Metric object.
+        num_categories: Number of categories (used to index per-class tensors).
+
+    Returns:
+        Mapping from metric name to a list of per-class float values.
+    """
+    per_class_results: dict[str, list[float]] = {}
+    for metric_name, metric_obj in metric_set.items():
+        computed = metric_obj.compute()
+        if metric_name == "precision_recall":
+            # PixelPrecisionRecall returns dict with "precision" and "recall" tensors
+            for sub_name, tensor in computed.items():
+                per_class_results[sub_name] = [tensor[idx].item() for idx in range(num_categories)]
+        elif isinstance(computed, torch.Tensor):
+            # MeanIoU, DiceScore return a tensor of shape (C,)
+            per_class_results[metric_name] = [computed[idx].item() for idx in range(num_categories)]
+    return per_class_results
+
+
+def _aggregate_results(
+    metrics_calculators: dict[int, dict[str, Metric]],
+    categories: list[str],
+    predict_timings: list[dict[str, float]],
+    fit_timings: list[dict[str, float]],
+    dataset_name: str,
+    model_name: str,
+    backbone_name: str,
+) -> pl.DataFrame:
+    """Aggregate per-prior metrics and timing into a single results DataFrame."""
     all_metrics = None
-    for prompt_index, iou_metric in metrics_calculators.items():
-        metrics = {"category": [], "iou": []}
+    for prompt_index, metric_set in metrics_calculators.items():
+        metrics: dict[str, list] = {"category": []}
 
-        # Compute IoU for all classes (returns tensor of shape (C,))
-        iou_per_class = iou_metric.compute()
+        per_class_results = _compute_per_class_metrics(metric_set, len(categories))
 
-        # Map each class index back to category name
+        # Build per-category rows
         for idx, cat_name in enumerate(categories):
-            iou_value = iou_per_class[idx].item()
             metrics["category"].append(cat_name)
-            metrics["iou"].append(iou_value)
+            for metric_name, values in per_class_results.items():
+                if metric_name not in metrics:
+                    metrics[metric_name] = []
+                metrics[metric_name].append(values[idx])
 
         ln = len(metrics["category"])
         metrics["prior_index"] = [prompt_index] * ln
-        metrics["inference_time"] = [time_sum / time_count if time_count > 0 else 0] * ln
+
+        # Aggregate timing: average predict time per sample for this prior
+        prior_predict_timings = [t for t in predict_timings if t.get("prior_index") == prompt_index]
+        if prior_predict_timings:
+            total_predict_ms = sum(t.get("total_ms", 0) for t in prior_predict_timings)
+            total_samples = sum(t.get("batch_size", 1) for t in prior_predict_timings)
+            avg_predict_ms = total_predict_ms / max(total_samples, 1)
+        else:
+            avg_predict_ms = 0.0
+
+        prior_fit_timings = [t for t in fit_timings if t.get("prior_index") == prompt_index]
+        avg_fit_ms = sum(t.get("total_ms", 0) for t in prior_fit_timings) / max(len(prior_fit_timings), 1)
+
+        metrics["fit_time_ms"] = [avg_fit_ms] * ln
+        metrics["predict_time_ms_per_sample"] = [avg_predict_ms] * ln
         metrics["dataset_name"] = [dataset_name] * ln
         metrics["model_name"] = [model_name] * ln
         metrics["backbone_name"] = [backbone_name] * ln
@@ -420,6 +510,10 @@ def perform_benchmark_experiment(args: Namespace | None = None) -> None:
     setup_logger(final_results_path, args.log_level)
     final_results_path.mkdir(parents=True, exist_ok=True)
 
+    # Parse requested metrics from CLI
+    metrics_arg = getattr(args, "metrics", "all")
+    requested_metrics = parse_metrics_arg(metrics_arg)
+
     # Get experiment lists and generate a plan
     datasets_to_run, models_to_run, backbones_to_run = parse_experiment_args(args)
     experiments = list(itertools.product(datasets_to_run, models_to_run, backbones_to_run))
@@ -477,6 +571,7 @@ def perform_benchmark_experiment(args: Namespace | None = None) -> None:
             backbone_name=backbone_enum.value,
             number_of_priors_tests=args.num_priors,
             device=args.device,
+            requested_metrics=requested_metrics,
         )
         all_results.append(all_metrics_df)
 

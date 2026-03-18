@@ -18,7 +18,6 @@ from instantlearn.data.base.batch import Batch
 from instantlearn.data.base.sample import Sample
 from instantlearn.models.sam3.sam3 import SAM3, Sam3PromptMode
 
-
 # -- Helpers --
 
 
@@ -103,7 +102,7 @@ def _make_mock_prompt_preprocessor() -> MagicMock:
     """Create a mock Sam3PromptPreprocessor."""
     pre = MagicMock()
     pre.to.return_value = pre
-    # Return (normalized_boxes, normalized_points)
+    # Returns a 2-tuple: (normalized_boxes_tensor, normalized_points_tensor)
     pre.return_value = (
         torch.tensor([[[0.3, 0.3, 0.1, 0.1]]]),  # cxcywh
         torch.tensor([[[0.5, 0.5]]]),  # xy
@@ -251,7 +250,6 @@ class TestSAM3Classic:
         target = Sample(image=torch.zeros(3, 224, 224))
         predictions = model.predict(target)
 
-        assert isinstance(predictions, list)
         assert len(predictions) == 1
         assert "pred_masks" in predictions[0]
         assert "pred_boxes" in predictions[0]
@@ -303,7 +301,6 @@ class TestSAM3Classic:
         )
         predictions = model.predict(target)
 
-        assert isinstance(predictions, list)
         assert len(predictions) == 1
 
 
@@ -428,7 +425,6 @@ class TestSAM3VisualExemplar:
         target = Sample(image=torch.zeros(3, 224, 224))
         predictions = model.predict(target)
 
-        assert isinstance(predictions, list)
         assert len(predictions) == 1
         assert "pred_masks" in predictions[0]
         assert "pred_boxes" in predictions[0]
@@ -480,7 +476,7 @@ class TestSAM3Utilities:
         ]
         batch = Batch.collate(samples)
 
-        mapping = SAM3._build_category_mapping(batch)
+        mapping = SAM3._build_category_mapping(batch)  # noqa: SLF001
 
         assert mapping == {"shoe": 0, "bag": 1, "hat": 2}
 
@@ -492,7 +488,7 @@ class TestSAM3Utilities:
         ]
         batch = Batch.collate(samples)
 
-        mapping = SAM3._build_category_mapping(batch)
+        mapping = SAM3._build_category_mapping(batch)  # noqa: SLF001
 
         assert mapping == {"shoe": 0}
 
@@ -502,7 +498,7 @@ class TestSAM3Utilities:
         boxes = [torch.rand(2, 5), torch.rand(1, 5)]
         labels = [torch.tensor([0, 0]), torch.tensor([1])]
 
-        result = SAM3._aggregate_results(masks, boxes, labels, (64, 64))
+        result = SAM3._aggregate_results(masks, boxes, labels, (64, 64))  # noqa: SLF001
 
         assert result["pred_masks"].shape == (3, 64, 64)
         assert result["pred_boxes"].shape == (3, 5)
@@ -514,7 +510,7 @@ class TestSAM3Utilities:
         boxes: list[torch.Tensor] = [torch.empty(0, 5)]
         labels: list[torch.Tensor] = [torch.empty(0, dtype=torch.long)]
 
-        result = SAM3._aggregate_results(masks, boxes, labels, (64, 64))
+        result = SAM3._aggregate_results(masks, boxes, labels, (64, 64))  # noqa: SLF001
 
         assert result["pred_masks"].shape == (0, 64, 64)
         assert result["pred_boxes"].shape == (0, 5)
@@ -544,5 +540,5 @@ class TestSam3PromptMode:
 
     def test_invalid_string_raises(self) -> None:
         """Test invalid string raises ValueError."""
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="invalid_mode"):
             Sam3PromptMode("invalid_mode")

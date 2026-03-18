@@ -29,173 +29,27 @@ HELP_DATASET_ARG_MSG = f"Dataset name or comma-separated list. Use 'all' to run 
 
 def populate_benchmark_parser(parser: argparse.ArgumentParser) -> None:
     """Populate the argument parser with benchmark arguments."""
-    parser.add_argument(
+    # --- General experiment options ---
+    general = parser.add_argument_group("General", "Experiment setup and output options")
+    general.add_argument(
         "--sam",
         type=str,
         default="SAM-HQ-tiny",
         help=HELP_SAM_ARG_MSG,
     )
-    parser.add_argument(
+    general.add_argument(
         "--model",
         type=str,
         default="Matcher",
         help=HELP_MODEL_ARG_MSG,
     )
-    parser.add_argument(
-        "--n_shot",
-        type=int,
-        default=1,
-        help="Number of prior images to use as references",
-    )
-    parser.add_argument(
+    general.add_argument(
         "--dataset_name",
         type=str,
         default="lvis",
         help=HELP_DATASET_ARG_MSG,
     )
-    parser.add_argument(
-        "--dataset_filenames",
-        type=str,
-        nargs="+",
-        help="Only perform inference on these files from the dataset. "
-        "Filename ambiguity can be solved by including subfolders. "
-        "For example: can/01.jpg instead of 01.jpg",
-    )
-    parser.add_argument("--save", action="store_true", help="Save results to disk")
-    parser.add_argument(
-        "--class_name",
-        type=str,
-        default=None,
-        help="Filter categories. Can be: "
-        "(1) preset name ('default', 'benchmark', 'all'), "
-        "(2) comma-separated list (e.g., 'cat,dog,bird'), "
-        "(3) None (uses 'default' preset)",
-    )
-    parser.add_argument(
-        "--num_grid_cells",
-        type=int,
-        default=16,
-        help="Number of grid cells to use for the grid prompt generator",
-    )
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite existing output data",
-    )
-    parser.add_argument(
-        "--experiment_name",
-        type=str,
-        default=None,
-        help="If passed, will save all",
-    )
-    parser.add_argument(
-        "--point_selection_threshold",
-        type=float,
-        default=0.65,
-        help="Minimum feature similarity for selecting foreground point prompts",
-    )
-    parser.add_argument(
-        "--confidence_threshold",
-        type=float,
-        default=0.42,
-        help="Minimum confidence score for keeping predicted masks in output",
-    )
-    parser.add_argument(
-        "--num_foreground_points",
-        type=int,
-        default=40,
-        help="Maximum number of foreground points to sample, if using the MaxPointFilter module",
-    )
-    parser.add_argument(
-        "--num_background_points",
-        type=int,
-        default=2,
-        help="Number of background points to sample",
-    )
-    parser.add_argument(
-        "--use_sampling",
-        action="store_true",
-        help="Use sampling",
-    )
-    parser.add_argument(
-        "--use_spatial_sampling",
-        action="store_true",
-        help="Use spatial sampling",
-    )
-    parser.add_argument(
-        "--approximate_matching",
-        action="store_true",
-        help="Use approximate matching",
-    )
-    parser.add_argument(
-        "--softmatching_score_threshold",
-        type=float,
-        default=0.4,
-        help="The score threshold for the soft matching",
-    )
-    parser.add_argument(
-        "--softmatching_bidirectional",
-        action="store_true",
-        help="Use bidirectional soft matching",
-    )
-    parser.add_argument(
-        "--num_priors",
-        type=int,
-        default=1,
-        help="Number of runs to perform, each time using the next image in the dataset as a prior",
-    )
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=5,
-        help="The maximum batch size used during inference.",
-    )
-    parser.add_argument(
-        "--precision",
-        type=str,
-        default="bf16",
-        choices=["fp32", "fp16", "bf16"],
-        help="The precision to use for the models. Maps to torch.float32, torch.float16, or torch.bfloat16",
-    )
-    parser.add_argument(
-        "--compile_models",
-        type=bool,
-        default=False,
-        help="Whether to compile the models",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda",
-        help="The device to use for the models",
-    )
-    parser.add_argument(
-        "--encoder_model",
-        type=str,
-        default="dinov3_large",
-        choices=list(AVAILABLE_IMAGE_ENCODERS),
-        help="ImageEncoder model id",
-    )
-    parser.add_argument(
-        "--grounding_model",
-        type=str,
-        default=GroundingModel.LLMDET_TINY.value,
-        choices=[g.value for g in GroundingModel],
-        help="The grounding model to use",
-    )
-    parser.add_argument(
-        "--box_threshold",
-        type=float,
-        default=0.4,
-        help="The box threshold for the grounding model",
-    )
-    parser.add_argument(
-        "--text_threshold",
-        type=float,
-        default=0.3,
-        help="The text threshold for the grounding model",
-    )
-    parser.add_argument(
+    general.add_argument(
         "--dataset_root",
         type=str,
         default=None,
@@ -205,20 +59,217 @@ def populate_benchmark_parser(parser: argparse.ArgumentParser) -> None:
             "and ~/data/lvis for LVIS."
         ),
     )
-    parser.add_argument(
+    general.add_argument(
+        "--dataset_filenames",
+        type=str,
+        nargs="+",
+        help="Only perform inference on these files from the dataset. "
+        "Filename ambiguity can be solved by including subfolders. "
+        "For example: can/01.jpg instead of 01.jpg",
+    )
+    general.add_argument(
+        "--class_name",
+        type=str,
+        default=None,
+        help="Filter categories. Can be: "
+        "(1) preset name ('default', 'benchmark', 'all'), "
+        "(2) comma-separated list (e.g., 'cat,dog,bird'), "
+        "(3) None (uses 'default' preset)",
+    )
+    general.add_argument(
+        "--n_shot",
+        type=int,
+        default=1,
+        help="Number of prior images to use as references",
+    )
+    general.add_argument(
+        "--num_priors",
+        type=int,
+        default=1,
+        help="Number of runs to perform, each time using the next image in the dataset as a prior",
+    )
+    general.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducible reference shuffling in multi-prior mode",
+    )
+    general.add_argument(
+        "--batch_size",
+        type=int,
+        default=5,
+        help="The maximum batch size used during inference.",
+    )
+    general.add_argument(
+        "--warmup",
+        type=int,
+        default=0,
+        help="Number of warmup iterations before timed benchmarking begins",
+    )
+    general.add_argument(
+        "--metrics",
+        type=str,
+        default="all",
+        help="Comma-separated list of metrics to compute, or 'all'. Available: iou, dice, precision, recall",
+    )
+    general.add_argument("--save", action="store_true", help="Save results to disk")
+    general.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing output data",
+    )
+    general.add_argument(
+        "--experiment_name",
+        type=str,
+        default=None,
+        help="If passed, will save all results under this experiment name",
+    )
+    general.add_argument(
+        "--log_level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging level",
+    )
+
+    # --- Model runtime options ---
+    runtime = parser.add_argument_group("Runtime", "Device, precision, and backend options")
+    runtime.add_argument(
+        "--precision",
+        type=str,
+        default="bf16",
+        choices=["fp32", "fp16", "bf16"],
+        help="The precision to use for the models. Maps to torch.float32, torch.float16, or torch.bfloat16",
+    )
+    runtime.add_argument(
+        "--compile_models",
+        type=bool,
+        default=False,
+        help="Whether to compile the models",
+    )
+    runtime.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        help="The device to use for the models",
+    )
+    runtime.add_argument(
         "--backend",
         type=str,
         default="pytorch",
         choices=["pytorch", "openvino"],
         help="Backend to use for inference. 'pytorch' uses PyTorch models, 'openvino' uses OpenVINO Runtime",
     )
-    parser.add_argument(
+    runtime.add_argument(
         "--export_dir",
         type=str,
         default=None,
         help="Directory containing exported OpenVINO models (only used with --backend openvino). "
         "If not provided, defaults to ./exports/{model_name}. "
         "If the directory doesn't exist, the model will be exported automatically.",
+    )
+
+    # --- Matcher / PerDino options ---
+    matcher_group = parser.add_argument_group(
+        "Matcher / PerDino",
+        "Options for Matcher, SoftMatcher, and PerDino models",
+    )
+    matcher_group.add_argument(
+        "--encoder_model",
+        type=str,
+        default="dinov3_large",
+        choices=list(AVAILABLE_IMAGE_ENCODERS),
+        help="ImageEncoder model id",
+    )
+    matcher_group.add_argument(
+        "--confidence_threshold",
+        type=float,
+        default=0.42,
+        help="Minimum confidence score for keeping predicted masks in output",
+    )
+    matcher_group.add_argument(
+        "--num_foreground_points",
+        type=int,
+        default=40,
+        help="Maximum number of foreground points to sample, if using the MaxPointFilter module",
+    )
+    matcher_group.add_argument(
+        "--num_background_points",
+        type=int,
+        default=2,
+        help="Number of background points to sample",
+    )
+    matcher_group.add_argument(
+        "--num_grid_cells",
+        type=int,
+        default=16,
+        help="Number of grid cells to use for the grid prompt generator (PerDino only)",
+    )
+    matcher_group.add_argument(
+        "--point_selection_threshold",
+        type=float,
+        default=0.65,
+        help="Minimum feature similarity for selecting foreground point prompts (PerDino only)",
+    )
+
+    # --- SoftMatcher options ---
+    soft_matcher = parser.add_argument_group("SoftMatcher", "Options specific to SoftMatcher")
+    soft_matcher.add_argument(
+        "--use_sampling",
+        action="store_true",
+        help="Use sampling",
+    )
+    soft_matcher.add_argument(
+        "--use_spatial_sampling",
+        action="store_true",
+        help="Use spatial sampling",
+    )
+    soft_matcher.add_argument(
+        "--approximate_matching",
+        action="store_true",
+        help="Use approximate matching",
+    )
+    soft_matcher.add_argument(
+        "--softmatching_score_threshold",
+        type=float,
+        default=0.4,
+        help="The score threshold for the soft matching",
+    )
+    soft_matcher.add_argument(
+        "--softmatching_bidirectional",
+        action="store_true",
+        help="Use bidirectional soft matching",
+    )
+
+    # --- GroundedSAM options ---
+    grounded = parser.add_argument_group("GroundedSAM", "Options specific to GroundedSAM")
+    grounded.add_argument(
+        "--grounding_model",
+        type=str,
+        default=GroundingModel.LLMDET_TINY.value,
+        choices=[g.value for g in GroundingModel],
+        help="The grounding model to use",
+    )
+    grounded.add_argument(
+        "--box_threshold",
+        type=float,
+        default=0.4,
+        help="The box threshold for the grounding model",
+    )
+    grounded.add_argument(
+        "--text_threshold",
+        type=float,
+        default=0.3,
+        help="The text threshold for the grounding model",
+    )
+
+    # --- SAM3 options ---
+    sam3_group = parser.add_argument_group("SAM3", "Options specific to SAM3 models")
+    sam3_group.add_argument(
+        "--resolution",
+        type=int,
+        default=1008,
+        help="Input resolution for SAM3 models",
     )
 
 

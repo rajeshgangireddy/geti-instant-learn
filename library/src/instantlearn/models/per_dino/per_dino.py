@@ -3,6 +3,8 @@
 
 """PerDino model."""
 
+import time
+
 import torch
 
 from instantlearn.components import CosineSimilarity, SamDecoder
@@ -11,7 +13,7 @@ from instantlearn.components.feature_extractors import MaskedFeatureExtractor, R
 from instantlearn.components.sam import load_sam_model
 from instantlearn.data.base.batch import Batch, Collatable
 from instantlearn.data.base.sample import Sample
-from instantlearn.models.base import Model
+from instantlearn.models.base import InferenceResult, Model
 from instantlearn.utils.constants import Backend, SAMModelName
 
 from .prompt_generators import GridPromptGenerator
@@ -143,15 +145,23 @@ class PerDino(Model):
                 - list[Sample]: A list of reference samples
                 - Batch: A batch of reference samples
         """
+        wall_start = time.perf_counter()
         reference_batch = Batch.collate(reference)
-        reference_embeddings = self.encoder(reference_batch.images)
-        self.ref_features = self.masked_feature_extractor(
-            reference_embeddings,
-            reference_batch.masks,
-            reference_batch.category_ids,
-        )
 
-    def predict(self, target: Collatable) -> list[dict[str, torch.Tensor]]:
+        with self._time_component("encoder") as t_enc:
+            reference_embeddings = self.encoder(reference_batch.images)
+
+        with self._time_component("feature_extractor") as t_feat:
+            self.ref_features = self.masked_feature_extractor(
+                reference_embeddings,
+                reference_batch.masks,
+                reference_batch.category_ids,
+            )
+
+        total_ms = (time.perf_counter() - wall_start) * 1000.0
+        self.last_fit_timing = self._build_timing([t_enc, t_feat], total_ms)
+
+    def predict(self, target: Collatable) -> InferenceResult:
         """Predict masks for target images.
 
         Args:
@@ -163,14 +173,12 @@ class PerDino(Model):
                 - list[str] | list[Path]: Multiple image paths
 
         Returns:
-            List of predictions per image, each containing:
-                "pred_masks": [num_masks, H, W]
-                "pred_scores": [num_masks]
-                "pred_labels": [num_masks] - category IDs
+            InferenceResult with predictions and per-component timing.
 
         Raises:
             RuntimeError: If reference features are not available.
         """
+        wall_start = time.perf_counter()
         target_batch = Batch.collate(target)
         if self.ref_features is None:
             msg = "No reference features. Call fit() first."
@@ -183,26 +191,34 @@ class PerDino(Model):
         )
 
         # Encode targets [T, num_patches, embed_dim]
-        target_embeddings = self.encoder(target_batch.images)
+        with self._time_component("encoder") as t_enc:
+            target_embeddings = self.encoder(target_batch.images)
 
         # Compute similarities [T, C, feat_size, feat_size]
-        similarities = self.similarity_matcher(
-            self.ref_features.masked_ref_embeddings,
-            target_embeddings,
-            self.ref_features.category_ids,
-        )
+        with self._time_component("similarity") as t_sim:
+            similarities = self.similarity_matcher(
+                self.ref_features.masked_ref_embeddings,
+                target_embeddings,
+                self.ref_features.category_ids,
+            )
 
         # Generate prompts [T, C, max_points, 4], [T, C]
-        point_prompts = self.prompt_generator(
-            similarities,
-            self.ref_features.category_ids,
-            original_sizes,
-        )
+        with self._time_component("prompt_generator") as t_prompt:
+            point_prompts = self.prompt_generator(
+                similarities,
+                self.ref_features.category_ids,
+                original_sizes,
+            )
 
         # Decode masks
-        return self.segmenter(
-            target_batch.images,
-            self.ref_features.category_ids,
-            point_prompts=point_prompts,
-            similarities=similarities,
-        )
+        with self._time_component("decoder") as t_dec:
+            predictions = self.segmenter(
+                target_batch.images,
+                self.ref_features.category_ids,
+                point_prompts=point_prompts,
+                similarities=similarities,
+            )
+
+        total_ms = (time.perf_counter() - wall_start) * 1000.0
+        timing = self._build_timing([t_enc, t_sim, t_prompt, t_dec], total_ms)
+        return InferenceResult(predictions=predictions, timing=timing)

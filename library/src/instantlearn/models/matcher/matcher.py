@@ -3,7 +3,14 @@
 
 """Matcher model, based on the paper 'Segment Anything with One Shot Using All-Purpose Feature Matching'."""
 
+import time
 from pathlib import Path
+
+try:
+    import openvino
+    import openvino.properties
+except ImportError:
+    openvino = None  # type: ignore[assignment]
 
 import torch
 from torch import nn
@@ -14,7 +21,7 @@ from instantlearn.components.feature_extractors import MaskedFeatureExtractor, R
 from instantlearn.components.sam import SamDecoder, load_sam_model
 from instantlearn.data.base.batch import Batch, Collatable
 from instantlearn.data.base.sample import Sample
-from instantlearn.models.base import Model
+from instantlearn.models.base import InferenceResult, Model
 from instantlearn.utils.constants import Backend, SAMModelName
 
 from .prompt_generators import BidirectionalPromptGenerator
@@ -32,6 +39,7 @@ class EncoderForwardFeaturesWrapper(nn.Module):
         ignore_token_length: int,
         input_size: int = 512,
     ) -> None:
+        """Initialize with encoder, ignore token length, and input size."""
         super().__init__()
         self.encoder = encoder
         self.ignore_token_length = ignore_token_length
@@ -59,6 +67,7 @@ class MatcherInferenceGraph(nn.Module):
         sam_decoder: SamDecoder,
         ref_features: ReferenceFeatures,
     ) -> None:
+        """Initialize with encoder, prompt generator, SAM decoder, and frozen reference features."""
         super().__init__()
         self.encoder = encoder
         self.prompt_generator = prompt_generator
@@ -238,16 +247,24 @@ class Matcher(Model):
                 - list[Sample]: A list of reference samples
                 - Batch: A batch of reference samples
         """
+        wall_start = time.perf_counter()
         reference_batch = Batch.collate(reference)
-        ref_embeddings = self.encoder(images=reference_batch.images)
-        self.ref_features = self.masked_feature_extractor(
-            ref_embeddings,
-            reference_batch.masks,
-            reference_batch.category_ids,
-        )
+
+        with self._time_component("encoder") as t_enc:
+            ref_embeddings = self.encoder(images=reference_batch.images)
+
+        with self._time_component("feature_extractor") as t_feat:
+            self.ref_features = self.masked_feature_extractor(
+                ref_embeddings,
+                reference_batch.masks,
+                reference_batch.category_ids,
+            )
+
+        total_ms = (time.perf_counter() - wall_start) * 1000.0
+        self.last_fit_timing = self._build_timing([t_enc, t_feat], total_ms)
         return self.ref_features
 
-    def predict(self, target: Collatable) -> list[dict[str, torch.Tensor]]:
+    def predict(self, target: Collatable) -> InferenceResult:
         """Predict masks for target images.
 
         Args:
@@ -259,14 +276,12 @@ class Matcher(Model):
                 - list[str] | list[Path]: Multiple image paths
 
         Returns:
-            List of predictions per image, each containing:
-                "pred_masks": [num_masks, H, W]
-                "pred_scores": [num_masks]
-                "pred_labels": [num_masks] - category IDs
+            InferenceResult with predictions and per-component timing.
 
         Raises:
             RuntimeError: If fit() has not been called before predict().
         """
+        wall_start = time.perf_counter()
         target_batch = Batch.collate(target)
         if self.ref_features is None:
             msg = "No reference features. Call fit() first."
@@ -279,25 +294,32 @@ class Matcher(Model):
         )
 
         # Encode all targets [T, num_patches, embed_dim]
-        target_embeddings = self.encoder(images=target_batch.images)
+        with self._time_component("encoder") as t_enc:
+            target_embeddings = self.encoder(images=target_batch.images)
 
         # Generate prompts [T, C, max_points, 4], [T, C], [T, C, feat_size, feat_size]
-        point_prompts, similarities = self.prompt_generator(
-            self.ref_features.ref_embeddings,
-            self.ref_features.masked_ref_embeddings,
-            self.ref_features.flatten_ref_masks,
-            self.ref_features.category_ids,
-            target_embeddings,
-            original_sizes,
-        )
+        with self._time_component("prompt_generator") as t_prompt:
+            point_prompts, similarities = self.prompt_generator(
+                self.ref_features.ref_embeddings,
+                self.ref_features.masked_ref_embeddings,
+                self.ref_features.flatten_ref_masks,
+                self.ref_features.category_ids,
+                target_embeddings,
+                original_sizes,
+            )
 
         # Decode masks for all images
-        return self.segmenter(
-            target_batch.images,
-            self.ref_features.category_ids,
-            point_prompts=point_prompts,
-            similarities=similarities,
-        )
+        with self._time_component("decoder") as t_dec:
+            predictions = self.segmenter(
+                target_batch.images,
+                self.ref_features.category_ids,
+                point_prompts=point_prompts,
+                similarities=similarities,
+            )
+
+        total_ms = (time.perf_counter() - wall_start) * 1000.0
+        timing = self._build_timing([t_enc, t_prompt, t_dec], total_ms)
+        return InferenceResult(predictions=predictions, timing=timing)
 
     @torch.no_grad()
     def export(
@@ -329,7 +351,7 @@ class Matcher(Model):
         export_device = self.ref_features.device
         if backend == Backend.OPENVINO:
             export_device = torch.device("cpu")
-        first_encoder_param = next(iter(self.encoder._model.model.parameters()), None)
+        first_encoder_param = next(iter(self.encoder._model.model.parameters()), None)  # noqa: SLF001
         if backend != Backend.OPENVINO and isinstance(first_encoder_param, torch.Tensor):
             export_device = first_encoder_param.device
 
@@ -339,8 +361,8 @@ class Matcher(Model):
 
         matcher = MatcherInferenceGraph(
             encoder=EncoderForwardFeaturesWrapper(
-                self.encoder._model.model,
-                ignore_token_length=self.encoder._model.ignore_token_length,
+                self.encoder._model.model,  # noqa: SLF001
+                ignore_token_length=self.encoder._model.ignore_token_length,  # noqa: SLF001
             ),
             prompt_generator=self.prompt_generator,
             sam_decoder=self.segmenter,
@@ -367,41 +389,39 @@ class Matcher(Model):
             return onnx_path
 
         if backend == Backend.OPENVINO:
-            try:
-                import openvino
-
-                # Export to ONNX first, then convert to OpenVINO
-                # Direct PyTorch → OpenVINO conversion fails on many ops (aten::pad, aten::unbind, etc.)
-                # ONNX → OpenVINO conversion has much better support
-                onnx_path = export_path / "matcher.onnx"
-                torch.onnx.export(
-                    matcher,
-                    args=(target_image,),
-                    f=onnx_path,
-                    input_names=["target_image"],
-                    output_names=["masks", "scores", "labels"],
-                    dynamic_axes={
-                        "target_image": {2: "height", 3: "width"},
-                        "masks": {0: "num_masks", 1: "height", 2: "width"},
-                        "scores": {0: "num_masks"},
-                        "labels": {0: "num_masks"},
-                    },
-                    dynamo=False,
-                )
-                # Prefer ONNX frontend path for better operator coverage.
-                # Fall back to direct conversion when ONNX export output is unavailable.
-                core = openvino.Core()
-                if onnx_path.exists():
-                    try:
-                        ov_model = core.read_model(str(onnx_path))
-                    except RuntimeError:
-                        ov_model = openvino.convert_model(matcher, example_input=target_image)
-                else:
-                    ov_model = openvino.convert_model(matcher, example_input=target_image)
-                openvino.save_model(ov_model, export_path / "matcher.xml")
-                return export_path / "matcher.xml"
-            except ImportError as e:
+            if openvino is None:
                 msg = "OpenVINO is not installed. Please install it to use OpenVINO export."
-                raise ImportError(msg) from e
+                raise ImportError(msg)
+
+            # Export to ONNX first, then convert to OpenVINO
+            # Direct PyTorch → OpenVINO conversion fails on many ops (aten::pad, aten::unbind, etc.)
+            # ONNX → OpenVINO conversion has much better support
+            onnx_path = export_path / "matcher.onnx"
+            torch.onnx.export(
+                matcher,
+                args=(target_image,),
+                f=onnx_path,
+                input_names=["target_image"],
+                output_names=["masks", "scores", "labels"],
+                dynamic_axes={
+                    "target_image": {2: "height", 3: "width"},
+                    "masks": {0: "num_masks", 1: "height", 2: "width"},
+                    "scores": {0: "num_masks"},
+                    "labels": {0: "num_masks"},
+                },
+                dynamo=False,
+            )
+            # Prefer ONNX frontend path for better operator coverage.
+            # Fall back to direct conversion when ONNX export output is unavailable.
+            core = openvino.Core()
+            if onnx_path.exists():
+                try:
+                    ov_model = core.read_model(str(onnx_path))
+                except RuntimeError:
+                    ov_model = openvino.convert_model(matcher, example_input=target_image)
+            else:
+                ov_model = openvino.convert_model(matcher, example_input=target_image)
+            openvino.save_model(ov_model, export_path / "matcher.xml")
+            return export_path / "matcher.xml"
 
         return export_path
