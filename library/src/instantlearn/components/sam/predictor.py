@@ -3,6 +3,7 @@
 
 """PyTorch backend implementation for SAM predictor."""
 
+import warnings
 from logging import getLogger
 from pathlib import Path
 from types import MethodType
@@ -68,8 +69,6 @@ def load_sam_model(
         ... )
     """
     if sam == SAMModelName.SAM_HQ_TINY:
-        import warnings
-
         warnings.warn(
             "SAM_HQ_TINY is deprecated due to GPU non-determinism. "
             "Use SAM_HQ_BASE instead. SAM_HQ_TINY will be removed in a future release.",
@@ -89,8 +88,8 @@ def load_sam_model(
     )
 
     # Apply PyTorch-specific optimizations
-    predictor._predictor = optimize_model(
-        model=predictor._predictor,
+    predictor._predictor = optimize_model(  # noqa: SLF001
+        model=predictor._predictor,  # noqa: SLF001
         device=device,
         precision=precision_to_torch_dtype(precision),
         compile_models=compile_models,
@@ -148,7 +147,7 @@ class PositionEmbeddingRandom(_PositionEmbeddingRandom):
         gaussian_matrix = self.positional_encoding_gaussian_matrix
         coords = coords.to(device=gaussian_matrix.device, dtype=gaussian_matrix.dtype)
         coords = 2 * coords - 1
-        coords = coords @ gaussian_matrix
+        coords = coords @ gaussian_matrix  # noqa: PLR6104
         coords = 2 * np.pi * coords
         return torch.cat([torch.sin(coords), torch.cos(coords)], dim=-1)
 
@@ -456,7 +455,7 @@ class SAMPredictor(nn.Module):
 
             repeat_count = int(tokens.shape[0])
             src = _expand_repeat(image_embeddings, repeat_count)
-            src = src + dense_prompt_embeddings
+            src = src + dense_prompt_embeddings  # noqa: PLR6104
             pos_src = _expand_repeat(image_pe, repeat_count)
             b, c, h, w = src.shape
 

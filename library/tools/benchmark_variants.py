@@ -1,12 +1,15 @@
-"""Benchmark SAM-HQ decoder × DINOv3 encoder variants: export, GPU/CPU inference, accuracy, determinism.
+# Copyright (C) 2025 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+"""Benchmark SAM-HQ decoder x DINOv3 encoder variants: export, GPU/CPU inference, accuracy, determinism.
 
 Usage:
     cd library
-    uv run python benchmark_variants.py
-    uv run python benchmark_variants.py --sam SAM-HQ-base SAM-HQ-large
-    uv run python benchmark_variants.py --encoder dinov3_small dinov3_base
-    uv run python benchmark_variants.py --sam SAM-HQ-base --encoder dinov3_small dinov3_large
-    uv run python benchmark_variants.py --sam SAM-HQ-tiny --gpu-iterations 20
+    uv run python tools/benchmark_variants.py
+    uv run python tools/benchmark_variants.py --sam SAM-HQ-base SAM-HQ-large
+    uv run python tools/benchmark_variants.py --encoder dinov3_small dinov3_base
+    uv run python tools/benchmark_variants.py --sam SAM-HQ-base --encoder dinov3_small dinov3_large
+    uv run python tools/benchmark_variants.py --sam SAM-HQ-tiny --gpu-iterations 20
 """
 
 import argparse
@@ -18,7 +21,7 @@ from time import time
 import numpy as np
 import openvino
 import torch
-import torch.nn.functional as F
+import torch.nn.functional as F  # noqa: N812
 
 from instantlearn.data import Sample
 from instantlearn.models import Matcher
@@ -166,7 +169,7 @@ def benchmark_variant(
         tic = time()
         outputs = compiled_gpu(input_data)
         result["ov_gpu_time_first"] = time() - tic
-        ov_gpu_masks, ov_gpu_scores, ov_gpu_labels = outputs.values()
+        ov_gpu_masks, ov_gpu_scores, _ = outputs.values()
         result["ov_gpu_scores"] = ov_gpu_scores.round(4).tolist()
 
         # GPU vs PyTorch mask IoU (resize OV masks to PT resolution)
@@ -209,7 +212,7 @@ def benchmark_variant(
         tic = time()
         outputs = compiled_cpu(input_data)
         result["ov_cpu_time"] = time() - tic
-        ov_cpu_masks, ov_cpu_scores, ov_cpu_labels = outputs.values()
+        ov_cpu_masks, ov_cpu_scores, _ = outputs.values()
         result["ov_cpu_scores"] = ov_cpu_scores.round(4).tolist()
         result["cpu_mask_iou_vs_pt"] = round(compute_iou(pt_masks, resize_masks_to_pt(ov_cpu_masks)), 4)
         result["gpu_cpu_mask_iou"] = round(compute_iou(ov_gpu_masks, ov_cpu_masks), 4)
@@ -267,7 +270,8 @@ def print_summary(results: list[dict]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Benchmark SAM-HQ decoder × DINOv3 encoder variants")
+    """Run SAM-HQ decoder x DINOv3 encoder benchmark across selected variants."""
+    parser = argparse.ArgumentParser(description="Benchmark SAM-HQ decoder x DINOv3 encoder variants")
     parser.add_argument(
         "--sam",
         nargs="+",
@@ -285,13 +289,13 @@ def main() -> None:
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    logger.info(f"Device: {device}")
+    logger.info("Device: %s", device)
 
     sam_variants = [SAMModelName(v) for v in args.sam] if args.sam else ALL_SAM_HQ_VARIANTS
     encoders = args.encoder or ALL_ENCODERS
 
     combos = [(sam, enc) for sam in sam_variants for enc in encoders]
-    logger.info(f"Testing {len(combos)} combinations: {len(sam_variants)} SAM × {len(encoders)} encoders")
+    logger.info("Testing %d combinations: %d SAM x %d encoders", len(combos), len(sam_variants), len(encoders))
 
     results = []
     for sam_variant, encoder in combos:

@@ -15,6 +15,10 @@
   ],
   "ignores": [
     "SECURITY.md",
-    ".github/copilot-instructions.md"
+    ".github/copilot-instructions.md",
+    "**/node_modules/**",
+    "**/.venv/**",
+    "**/cuda/**",
+    "**/xpu/**"
   ]
 }

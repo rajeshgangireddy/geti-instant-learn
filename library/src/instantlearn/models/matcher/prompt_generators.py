@@ -316,7 +316,9 @@ class BidirectionalPromptGenerator(nn.Module):
         # Max-pooled similarity: for each target, max similarity to any masked ref.
         neg_inf = torch.tensor(-65504.0, device=device, dtype=similarity_map.dtype)
         masked_sim = torch.where(
-            mask_float.unsqueeze(1) > 0.5, similarity_map, neg_inf,
+            mask_float.unsqueeze(1) > 0.5,
+            similarity_map,
+            neg_inf,
         )  # [num_ref, num_target]
         max_sim_per_target = masked_sim.max(dim=0).values  # [num_target]
 
