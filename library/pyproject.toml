@@ -90,6 +90,9 @@ notebook = [
 quantize = [
     "nncf>=2.14.0",
 ]
+demo = [
+    "gradio>=4.0",
+]
 dev = [
     "ruff==0.11.12",
     "pre-commit==4.2.0",
@@ -107,7 +110,7 @@ docs = [
 ]
 
 full = [
-    "instantlearn[dev, notebook, quantize]",
+    "instantlearn[dev, notebook, quantize, demo]",
 ]
 
 [project.scripts]
