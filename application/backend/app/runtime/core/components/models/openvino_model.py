@@ -25,12 +25,12 @@ class OpenVINOModelHandler(ModelHandler):
         self._model = model
         self._reference_batch = reference_batch
         self._precision = precision
-        self._compiled_model = None
-        self._infer_request = None
-        self._input_port = None
-        self._masks_output_port = None
-        self._scores_output_port = None
-        self._labels_output_port = None
+        self._compiled_model: openvino.CompiledModel | None = None
+        self._infer_request: openvino.InferRequest | None = None
+        self._input_port: openvino.ConstOutput | None = None
+        self._masks_output_port: openvino.ConstOutput | None = None
+        self._scores_output_port: openvino.ConstOutput | None = None
+        self._labels_output_port: openvino.ConstOutput | None = None
 
     def _get_target_size(self) -> int | None:
         """Return target square input size from wrapped model when available."""
