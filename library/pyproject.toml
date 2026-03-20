@@ -244,6 +244,10 @@ notice-rgx = '# Copyright \(C\) (\d{4}(-\d{4})?) Intel Corporation\r?\n# SPDX-Li
     "PLR0915",  # Too many statements — expected in benchmark scripts
     "G004",     # Logging f-strings acceptable in standalone dev tools
 ]
+"examples/**/*.ipynb" = [
+    "T201",     # print() is the standard output mechanism in notebooks
+    "N812",     # Allow conventional aliases like `import torch.nn.functional as F`
+]
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
