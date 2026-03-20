@@ -375,9 +375,9 @@ class SAMPredictor(nn.Module):
             sam_model = build_sam2(config_path, str(checkpoint_path))
             self._predictor = SAM2ImagePredictor(sam_model)
         elif sam_model_name in {
-            SAMModelName.SAM_HQ,
             SAMModelName.SAM_HQ_BASE,
             SAMModelName.SAM_HQ_LARGE,
+            SAMModelName.SAM_HQ,
             SAMModelName.SAM_HQ_TINY,
         }:
             registry_name = MODEL_MAP[sam_model_name]["registry_name"]

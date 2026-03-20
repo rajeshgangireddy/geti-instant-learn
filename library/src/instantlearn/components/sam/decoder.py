@@ -210,9 +210,21 @@ class SamDecoder(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Export-safe prediction: no data-dependent control flow, no NMS.
 
-        In export mode, _preprocess_points produces [1, max_points, 2] (single prompt set).
-        SAM returns [1, 1, H, W] — exactly 1 mask per category.
-        Scoring uses similarity weighting; thresholding is deferred to post-processing.
+        All foreground points are merged into a single prompt set [1, max_points, 2].
+        SAM returns 3 candidate masks (multimask_output=True); we keep only the
+        best one by IoU score, producing exactly 1 mask per category.
+
+        This means the export graph is **semantic-only** — it cannot represent
+        multiple instances of the same category.  The PyTorch runtime path
+        (`_predict_masks_for_category`) does not have this limitation.
+
+        Scoring uses similarity weighting; thresholding is deferred to
+        post-processing.
+
+        TODO(export): Return all 3 SAM masks per category [C, 3, H, W] to allow
+        the host-side post-processor to recover up to 3 instances per class.
+        For more instances, individual foreground points would need separate SAM
+        calls (K x C passes), which is slower.
         """
         masks, iou_preds, _ = self.predictor.forward(
             point_coords=point_coords,
@@ -560,9 +572,15 @@ class SamDecoder(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Export-friendly forward for single image returning flat tensors.
 
-        Produces fixed-size output [C, H, W] — exactly 1 mask per category.
+        Produces fixed-size output [C, H, W] — exactly 1 mask per category
+        (semantic segmentation).  Instance segmentation is not supported in the
+        export path because the ONNX graph requires static output shapes and
+        cannot represent a variable number of instances.
+
+        The host-side ``PostProcessor`` can recover limited instance information
+        via connected-component analysis on the per-category masks.
+
         No data-dependent control flow, no NMS, no dynamic filtering.
-        Post-processing (thresholding, NMS, connected components) is done externally.
 
         Args:
             image: Single input image [3, H, W]

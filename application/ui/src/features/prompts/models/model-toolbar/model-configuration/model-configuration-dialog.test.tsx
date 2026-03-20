@@ -126,7 +126,7 @@ describe('ModelConfigurationDialog', () => {
 
         await modelConfigurationDialogPage.changeDecoderModel('SAM2 Small');
         expect(modelConfigurationDialogPage.configureButton).toBeEnabled();
-        await modelConfigurationDialogPage.changeDecoderModel('SAM-HQ Tiny');
+        await modelConfigurationDialogPage.changeDecoderModel('SAM-HQ Base');
         expect(modelConfigurationDialogPage.configureButton).toBeDisabled();
 
         await modelConfigurationDialogPage.changePrecision('FP16');
