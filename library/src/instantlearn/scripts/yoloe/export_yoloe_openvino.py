@@ -40,6 +40,53 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def _compute_vpe(
+    inner: object,
+    model_name: str,
+    imgsz: int,
+    refer_image: str | Path,
+    bboxes: list[list[float]],
+    cls_ids: list[int],
+) -> object:
+    """Compute visual prompt embeddings for a single reference image.
+
+    Args:
+        inner: The inner YOLOE model (``model.model``).
+        model_name: YOLOE model variant name (needed for seg/detect).
+        imgsz: Input image size used for the predictor.
+        refer_image: Path to the reference image.
+        bboxes: Bounding boxes ``[[x1, y1, x2, y2], ...]``.
+        cls_ids: Class indices aligned with bboxes.
+
+    Returns:
+        Visual prompt embedding tensor of shape ``[1, N, D]``.
+    """
+    from ultralytics.models.yolo.yoloe.predict import (
+        YOLOEVPDetectPredictor,
+        YOLOEVPSegPredictor,
+    )
+
+    predictor_cls = (
+        YOLOEVPSegPredictor if "seg" in model_name
+        else YOLOEVPDetectPredictor
+    )
+
+    visual_prompts = {"bboxes": bboxes, "cls": cls_ids}
+    predictor = predictor_cls(
+        overrides={
+            "task": inner.task,
+            "mode": "predict",
+            "save": False,
+            "verbose": False,
+            "batch": 1,
+            "imgsz": imgsz,
+        },
+    )
+    predictor.set_prompts(visual_prompts)
+    predictor.setup_model(model=inner)
+    return predictor.get_vpe(str(refer_image))
+
+
 def export_yoloe_openvino(
     model_name: str,
     classes: list[str],
@@ -48,6 +95,7 @@ def export_yoloe_openvino(
     half: bool = False,
     *,
     refer_image: str | Path | None = None,
+    refer_images: list[dict] | None = None,
     bboxes: list[list[float]] | None = None,
     cls_ids: list[int] | None = None,
 ) -> Path:
@@ -58,8 +106,15 @@ def export_yoloe_openvino(
     * **Text prompt** (default): class names are embedded via the CLIP
       text encoder.
     * **Visual prompt**: a reference image with bounding boxes is used
-      to compute visual embeddings via the SAVPE module.  Provide
-      ``refer_image``, ``bboxes``, and optionally ``cls_ids``.
+      to compute visual embeddings via the SAVPE module.
+
+    For visual prompt, provide **either**:
+
+    * ``refer_image`` + ``bboxes`` for a single reference, **or**
+    * ``refer_images`` — a list of dicts, each with keys
+      ``"image"`` (path), ``"bboxes"`` (list of ``[x1, y1, x2, y2]``),
+      and optionally ``"cls_ids"`` (list of int).  Embeddings from all
+      references are averaged, producing more robust visual prompts.
 
     In both cases the embeddings are permanently fused into the conv
     weights — the exported IR is structurally identical.
@@ -68,10 +123,15 @@ def export_yoloe_openvino(
         model_name: YOLOE model variant (e.g. ``"yoloe-26s-seg"``).
         classes: List of class names to bake into the model.
         output_dir: Directory to save the OpenVINO IR files.
-        imgsz: Input image size.
+        imgsz: Input image size.  **Keep at 640 for visual prompt** —
+            higher resolutions degrade VP quality significantly.
         half: Whether to export with FP16 precision.
-        refer_image: Path to the reference image for visual prompt
-            export.  When ``None`` (default), text prompt is used.
+        refer_image: Path to the reference image for single-reference
+            visual prompt export.
+        refer_images: List of reference dicts for multi-reference VP.
+            Each dict: ``{"image": path, "bboxes": [[x1,y1,x2,y2],...],
+            "cls_ids": [0,...]}``.  When provided, ``refer_image`` and
+            ``bboxes`` are ignored.
         bboxes: Bounding boxes ``[[x1, y1, x2, y2], ...]`` on the
             reference image.  Required when ``refer_image`` is given.
         cls_ids: Integer class indices aligned with *bboxes*.  Defaults
@@ -85,6 +145,7 @@ def export_yoloe_openvino(
         ValueError: If the model name is not recognised or arguments
             are inconsistent.
     """
+    import torch
     from ultralytics import YOLO
 
     from instantlearn.models.yoloe.yoloe import YOLOE_MODELS
@@ -107,50 +168,59 @@ def export_yoloe_openvino(
 
     prompt_mode: str
 
-    if refer_image is not None:
-        # ---- Visual prompt ------------------------------------------------
+    # Normalise refer_images from the single-image shorthand
+    if refer_images is None and refer_image is not None:
         if bboxes is None:
             msg = "bboxes are required when refer_image is provided."
             raise ValueError(msg)
         if cls_ids is None:
             cls_ids = list(range(len(bboxes)))
+        refer_images = [
+            {"image": refer_image, "bboxes": bboxes, "cls_ids": cls_ids}
+        ]
+
+    if refer_images is not None:
+        # ---- Visual prompt ------------------------------------------------
+        if not refer_images:
+            msg = "refer_images list must not be empty."
+            raise ValueError(msg)
+
+        # Determine number of classes from the first reference
+        first_cls_ids = refer_images[0].get(
+            "cls_ids", list(range(len(refer_images[0]["bboxes"])))
+        )
+        num_cls = len(set(first_cls_ids))
 
         prompt_mode = "visual"
-        logger.info(
-            "Computing visual prompt embeddings from %s (%d boxes)...",
-            refer_image,
-            len(bboxes),
-        )
-
-        from ultralytics.models.yolo.yoloe.predict import (
-            YOLOEVPDetectPredictor,
-            YOLOEVPSegPredictor,
-        )
-        predictor_cls = (
-            YOLOEVPSegPredictor if "seg" in model_name
-            else YOLOEVPDetectPredictor
-        )
-
-        visual_prompts = {"bboxes": bboxes, "cls": cls_ids}
-        num_cls = len(set(cls_ids))
         inner.model[-1].nc = num_cls
         inner.names = classes[:num_cls]
 
-        predictor = predictor_cls(
-            overrides={
-                "task": inner.task,
-                "mode": "predict",
-                "save": False,
-                "verbose": False,
-                "batch": 1,
-                "imgsz": imgsz,
-            },
-        )
-        predictor.set_prompts(visual_prompts)
-        predictor.setup_model(model=inner)
+        # Compute VPE for each reference and average
+        vpes = []
+        for ref in refer_images:
+            ref_cls = ref.get("cls_ids", list(range(len(ref["bboxes"]))))
+            logger.info(
+                "Computing visual prompt embeddings from %s (%d boxes)...",
+                ref["image"],
+                len(ref["bboxes"]),
+            )
+            vpe = _compute_vpe(
+                inner, model_name, imgsz,
+                refer_image=ref["image"],
+                bboxes=ref["bboxes"],
+                cls_ids=ref_cls,
+            )
+            vpes.append(vpe)
 
-        vpe = predictor.get_vpe(str(refer_image))
-        inner.set_classes(classes[:num_cls], vpe)
+        if len(vpes) == 1:
+            avg_vpe = vpes[0]
+        else:
+            avg_vpe = torch.stack(vpes).mean(dim=0)
+            logger.info(
+                "Averaged %d visual prompt embeddings.", len(vpes),
+            )
+
+        inner.set_classes(classes[:num_cls], avg_vpe)
         logger.info("Visual embeddings fused into model weights.")
     else:
         # ---- Text prompt --------------------------------------------------
@@ -187,10 +257,15 @@ def export_yoloe_openvino(
         "half": half,
         "prompt_mode": prompt_mode,
     }
-    if refer_image is not None:
-        meta["refer_image"] = str(refer_image)
-        meta["bboxes"] = bboxes
-        meta["cls_ids"] = cls_ids
+    if refer_images is not None:
+        meta["refer_images"] = [
+            {
+                "image": str(r["image"]),
+                "bboxes": r["bboxes"],
+                "cls_ids": r.get("cls_ids"),
+            }
+            for r in refer_images
+        ]
     with meta_path.open("w") as f:
         json.dump(meta, f, indent=2)
 
