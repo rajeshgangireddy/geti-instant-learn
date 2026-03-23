@@ -104,7 +104,7 @@ class TestBenchmarkModelHandling:
         """Test running prediction on dataset with single model."""
         with (
             patch("instantlearn.scripts.benchmark.load_model") as mock_load_model,
-            patch("instantlearn.scripts.benchmark.MeanIoU") as mock_metrics,
+            patch("instantlearn.scripts.benchmark.SegmentationMetrics") as mock_metrics,
             patch("instantlearn.scripts.benchmark.learn_from_category") as mock_learn,
             patch("instantlearn.scripts.benchmark.predict_on_category") as mock_infer,
             patch("instantlearn.scripts.benchmark.prepare_output_directory") as mock_handle_path,
@@ -113,10 +113,15 @@ class TestBenchmarkModelHandling:
             mock_load_model.return_value = mock_model
             mock_handle_path.return_value = Path(tempfile.mkdtemp())
 
-            # Create mock MeanIoU instance that returns IoU values
+            # Create mock SegmentationMetrics instance that returns metric values
             mock_metrics_instance = MagicMock()
-            # MeanIoU.compute() returns a tensor of shape (num_classes,)
-            mock_metrics_instance.compute.return_value = torch.tensor([0.8, 0.9], dtype=torch.float32)
+            # SegmentationMetrics.compute() returns a dict of tensors, each of shape (num_classes,)
+            mock_metrics_instance.compute.return_value = {
+                "iou": torch.tensor([0.8, 0.9], dtype=torch.float32),
+                "f1": torch.tensor([0.85, 0.92], dtype=torch.float32),
+                "precision": torch.tensor([0.88, 0.95], dtype=torch.float32),
+                "recall": torch.tensor([0.82, 0.89], dtype=torch.float32),
+            }
             mock_metrics_instance.update.return_value = None
             mock_metrics.return_value = mock_metrics_instance
 
@@ -128,7 +133,7 @@ class TestBenchmarkModelHandling:
 
             # Mock the learn and infer functions
             mock_learn.return_value = ([], [])
-            mock_infer.return_value = (0, 0)  # (total_time, n_samples)
+            mock_infer.return_value = [0.05, 0.06]  # per-image inference times
 
             # Create mock args
             mock_args = MagicMock()

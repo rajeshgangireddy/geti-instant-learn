@@ -4,7 +4,9 @@
 """Geti Instant Learn Benchmark Script."""
 
 import itertools
+import time
 from argparse import Namespace
+from datetime import datetime, timezone
 from logging import getLogger
 from pathlib import Path
 
@@ -12,7 +14,6 @@ import polars as pl
 import torch
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 from torch.utils.data import DataLoader
-from torchmetrics.segmentation import MeanIoU
 
 from instantlearn.data import Dataset, LVISDataset, PerSegDataset
 from instantlearn.data.base import Batch
@@ -29,6 +30,7 @@ from instantlearn.utils.benchmark import (
     prepare_output_directory,
 )
 from instantlearn.utils.constants import get_category_presets
+from instantlearn.utils.metrics import SegmentationMetrics
 from instantlearn.visualizer import Visualizer
 
 logger = getLogger("Geti Instant Learn")
@@ -40,12 +42,12 @@ def predict_on_category(
     category_name: str,
     priors_batch_index: int,
     visualizer: Visualizer,
-    metrics_calculators: dict[int, MeanIoU],
+    metrics_calculators: dict[int, SegmentationMetrics],
     progress: Progress,
     batch_size: int,
     device: torch.device,
     visualize: bool = True,
-) -> None:
+) -> list[float]:
     """Perform prediction on all samples of a category.
 
     Args:
@@ -59,6 +61,9 @@ def predict_on_category(
         batch_size: Batch size for DataLoader
         device: The device to use.
         visualize: Whether to visualize the results
+
+    Returns:
+        List of per-image inference times in seconds.
 
     Raises:
         ValueError: If no target samples are found for the category.
@@ -89,6 +94,8 @@ def predict_on_category(
     # Create category ID to index mapping
     num_classes = len(dataset.categories)
     category_id_to_index = {dataset.get_category_id(cat_name): idx for idx, cat_name in enumerate(dataset.categories)}
+    per_image_times: list[float] = []
+    use_cuda = device.type == "cuda"
 
     for batch in dataloader:
         # Run prediction
@@ -96,7 +103,18 @@ def predict_on_category(
             for sample in batch:
                 sample.categories = ["visual"]  # Obscure category name to prevent cheating for SAM3
 
+        # Time model inference (with GPU sync for accurate measurement)
+        if use_cuda:
+            torch.cuda.synchronize(device)
+        t_start = time.perf_counter()
         predictions = model.predict(batch)
+        if use_cuda:
+            torch.cuda.synchronize(device)
+        t_end = time.perf_counter()
+
+        batch_time = t_end - t_start
+        num_images_in_batch = len(predictions)
+        per_image_times.extend([batch_time / num_images_in_batch] * num_images_in_batch)
 
         # Convert masks to one-hot boolean tensors for torchmetrics
         # Returns lists of tensors, each with shape (C, H, W)
@@ -133,6 +151,7 @@ def predict_on_category(
         progress.update(batches_task, advance=1)
 
     progress.remove_task(batches_task)
+    return per_image_times
 
 
 def learn_from_category(dataset: Dataset, model: Model, category_name: str) -> None:
@@ -194,12 +213,11 @@ def predict_on_dataset(
         output_folder=str(output_path),
         class_map={dataset.get_category_id(category): category for category in dataset.categories},
     )
-    # Keep metrics per prior: dict[prior_index, MeanIoU]
-    # Single MeanIoU instance computes IoU for all classes
-    metrics_calculators: dict[int, MeanIoU] = {}
+    # Keep metrics per prior: dict[prior_index, SegmentationMetrics]
+    metrics_calculators: dict[int, SegmentationMetrics] = {}
 
-    time_sum = 0
-    time_count = 0
+    # Per-image inference times keyed by prior index
+    inference_times: dict[int, list[float]] = {}
 
     # Setup Rich Progress
     progress = Progress(
@@ -225,13 +243,13 @@ def predict_on_dataset(
 
             # For now, only use 1 prior batch (can be extended for multiple prior batches)
             for priors_batch_index in range(number_of_priors_tests):
-                # Initialize MeanIoU metric for this prior if needed
+                # Initialize metrics for this prior if needed
                 if priors_batch_index not in metrics_calculators:
-                    metrics_calculators[priors_batch_index] = MeanIoU(
+                    metrics_calculators[priors_batch_index] = SegmentationMetrics(
                         num_classes=len(dataset.categories),
-                        include_background=True,
-                        per_class=True,
-                    ).to(device)
+                        device=device,
+                    )
+                    inference_times[priors_batch_index] = []
 
                 # Learn from reference samples
                 learn_from_category(
@@ -242,7 +260,7 @@ def predict_on_dataset(
                 progress.update(priors_task, advance=1)
 
                 # Predict on target samples
-                predict_on_category(
+                per_image_times = predict_on_category(
                     dataset=dataset,
                     model=model,
                     category_name=category_name,
@@ -253,27 +271,36 @@ def predict_on_dataset(
                     batch_size=args.batch_size,
                     device=device,
                 )
+                inference_times[priors_batch_index].extend(per_image_times)
 
             progress.remove_task(priors_task)
             progress.update(categories_task, advance=1)
 
     # Construct the output metrics file from the calculated metrics
     all_metrics = None
-    for prompt_index, iou_metric in metrics_calculators.items():
-        metrics = {"category": [], "iou": []}
+    for prompt_index, seg_metric in metrics_calculators.items():
+        metrics: dict[str, list] = {"category": [], "iou": [], "f1": [], "precision": [], "recall": []}
 
-        # Compute IoU for all classes (returns tensor of shape (C,))
-        iou_per_class = iou_metric.compute()
+        # Compute all metrics per class
+        computed = seg_metric.compute()
 
         # Map each class index back to category name
         for idx, cat_name in enumerate(categories):
-            iou_value = iou_per_class[idx].item()
             metrics["category"].append(cat_name)
-            metrics["iou"].append(iou_value)
+            metrics["iou"].append(computed["iou"][idx].item())
+            metrics["f1"].append(computed["f1"][idx].item())
+            metrics["precision"].append(computed["precision"][idx].item())
+            metrics["recall"].append(computed["recall"][idx].item())
 
         ln = len(metrics["category"])
         metrics["prior_index"] = [prompt_index] * ln
-        metrics["inference_time"] = [time_sum / time_count if time_count > 0 else 0] * ln
+
+        # Per-image inference time stats
+        times = inference_times.get(prompt_index, [])
+        avg_time = sum(times) / len(times) if times else 0.0
+        metrics["avg_inference_time_per_image"] = [avg_time] * ln
+        metrics["total_images"] = [len(times)] * ln
+
         metrics["dataset_name"] = [dataset_name] * ln
         metrics["model_name"] = [model_name] * ln
         metrics["backbone_name"] = [backbone_name] * ln
@@ -417,8 +444,12 @@ def perform_benchmark_experiment(args: Namespace | None = None) -> None:
     # The final results path will include the experiment name if provided.
     final_results_path = base_output_path / args.experiment_name if args.experiment_name else base_output_path
 
-    setup_logger(final_results_path, args.log_level)
+    log_level = getattr(args, "log_level", "INFO")
+    setup_logger(final_results_path, log_level)
     final_results_path.mkdir(parents=True, exist_ok=True)
+
+    # Ensure device is a torch.device object
+    device = torch.device(args.device) if isinstance(args.device, str) else args.device
 
     # Get experiment lists and generate a plan
     datasets_to_run, models_to_run, backbones_to_run = parse_experiment_args(args)
@@ -429,7 +460,7 @@ def perform_benchmark_experiment(args: Namespace | None = None) -> None:
     for dataset_enum, model_enum, backbone_enum in experiments:
         msg = (
             f"Starting experiment with Dataset={dataset_enum.value}, "
-            f"Model={model_enum.value}, Backbone={backbone_enum.value}",
+            f"Model={model_enum.value}, Backbone={backbone_enum.value}"
         )
         logger.info(msg)
 
@@ -476,9 +507,10 @@ def perform_benchmark_experiment(args: Namespace | None = None) -> None:
             model_name=model_enum.value,
             backbone_name=backbone_enum.value,
             number_of_priors_tests=args.num_priors,
-            device=args.device,
+            device=device,
         )
         all_results.append(all_metrics_df)
 
-    # Save aggregated results to the final results path
-    _save_results(all_results, final_results_path)
+    # Save aggregated results with timestamp
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+    _save_results(all_results, final_results_path, timestamp=timestamp)

@@ -88,25 +88,28 @@ def _get_output_path_for_experiment(
     return output_path / combo_str
 
 
-def _save_results(all_results: list[pl.DataFrame], output_path: Path) -> None:
+def _save_results(all_results: list[pl.DataFrame], output_path: Path, timestamp: str = "") -> None:
     """Concatenate and save all experiment results.
 
     Args:
         all_results: The results to save
         output_path: The path to save the results
+        timestamp: Optional timestamp string to append to filenames
     """
     if not all_results:
         logger.warning("No experiments were run. Check your arguments.")
         return
 
+    suffix = f"_{timestamp}" if timestamp else ""
+
     all_result_dataframe = pl.concat(all_results)
-    all_results_dataframe_filename = output_path / "all_results.csv"
+    all_results_dataframe_filename = output_path / f"all_results{suffix}.csv"
     all_results_dataframe_filename.parent.mkdir(parents=True, exist_ok=True)
     all_result_dataframe.write_csv(str(all_results_dataframe_filename))
     msg = f"Saved all results to: {all_results_dataframe_filename}"
     logger.info(msg)
 
-    avg_results_dataframe_filename = output_path / "avg_results.csv"
+    avg_results_dataframe_filename = output_path / f"avg_results{suffix}.csv"
     avg_results_dataframe_filename.parent.mkdir(parents=True, exist_ok=True)
     avg_result_dataframe = all_result_dataframe.group_by(
         ["dataset_name", "model_name", "backbone_name"],

@@ -206,6 +206,13 @@ def populate_benchmark_parser(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
+        "--log_level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Set the logging level.",
+    )
+    parser.add_argument(
         "--backend",
         type=str,
         default="pytorch",
