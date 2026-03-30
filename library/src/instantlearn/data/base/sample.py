@@ -15,6 +15,12 @@ from torchvision import tv_tensors
 
 from instantlearn.data.utils.image import read_image, read_mask
 
+#: Reserved category name for background / negative masks.
+BACKGROUND_CATEGORY: str = "background"
+
+#: Reserved category ID for background / negative masks (COCO convention).
+BACKGROUND_CATEGORY_ID: int = 0
+
 
 @dataclass
 class Sample:
@@ -149,3 +155,58 @@ class Sample:
             points=_select(self.points),
             scores=_select(self.scores),
         )
+
+    def has_background(self) -> bool:
+        """Check whether any instance in this sample is a background/negative annotation."""
+        if self.category_ids is None:
+            return False
+        for cid in self.category_ids:
+            val = int(cid.item()) if isinstance(cid, (torch.Tensor, np.integer)) else int(cid)
+            if val == BACKGROUND_CATEGORY_ID:
+                return True
+        return False
+
+    def split_foreground_background(self) -> tuple["Sample | None", "Sample | None"]:
+        """Split into separate foreground and background samples.
+
+        Returns:
+            Tuple of (foreground_sample, background_sample). Either can be None
+            if no instances of that type exist.
+        """
+        if self.category_ids is None:
+            return self, None
+
+        fg_indices = []
+        bg_indices = []
+        for i, cid in enumerate(self.category_ids):
+            val = int(cid.item()) if isinstance(cid, (torch.Tensor, np.integer)) else int(cid)
+            if val == BACKGROUND_CATEGORY_ID:
+                bg_indices.append(i)
+            else:
+                fg_indices.append(i)
+
+        def _make_sample(indices: list[int]) -> "Sample | None":
+            if not indices:
+                return None
+
+            def _sel(data: list | np.ndarray | torch.Tensor | None) -> list | np.ndarray | torch.Tensor | None:
+                if data is None:
+                    return None
+                if isinstance(data, (np.ndarray, torch.Tensor)):
+                    return data[indices]
+                return [data[i] for i in indices]
+
+            return Sample(
+                image=self.image,
+                image_path=self.image_path,
+                categories=[self.categories[i] for i in indices],
+                category_ids=_sel(self.category_ids),
+                masks=_sel(self.masks),
+                bboxes=_sel(self.bboxes),
+                points=_sel(self.points),
+                scores=_sel(self.scores),
+                is_reference=[self.is_reference[i] for i in indices] if self.is_reference else [False],
+                n_shot=[self.n_shot[i] for i in indices] if self.n_shot else [-1],
+            )
+
+        return _make_sample(fg_indices), _make_sample(bg_indices)

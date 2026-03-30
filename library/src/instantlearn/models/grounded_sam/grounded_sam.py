@@ -9,7 +9,7 @@ from instantlearn.components import SamDecoder
 from instantlearn.components.postprocessing import PostProcessor, default_postprocessor
 from instantlearn.components.sam import load_sam_model
 from instantlearn.data.base.batch import Batch, Collatable
-from instantlearn.data.base.sample import Sample
+from instantlearn.data.base.sample import BACKGROUND_CATEGORY_ID, Sample
 from instantlearn.models.base import Model
 from instantlearn.utils.constants import SAMModelName
 
@@ -79,6 +79,8 @@ class GroundedSAM(Model):
         self.category_mapping = {}
         for sample in reference_batch.samples:
             for category_id, category in zip(sample.category_ids, sample.categories, strict=False):
+                if int(category_id) == BACKGROUND_CATEGORY_ID:
+                    continue
                 if category not in self.category_mapping:
                     self.category_mapping[category] = int(category_id)
 
