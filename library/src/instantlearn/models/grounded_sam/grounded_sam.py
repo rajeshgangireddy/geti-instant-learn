@@ -3,6 +3,8 @@
 
 """This model uses a zero-shot object detector (from Huggingface) to generate boxes for SAM."""
 
+import logging
+
 import torch
 
 from instantlearn.components import SamDecoder
@@ -15,6 +17,8 @@ from instantlearn.utils.constants import SAMModelName
 
 from .grounded import GroundingModel, TextToBoxPromptGenerator
 from .prompt_filter import BoxPromptFilter
+
+logger = logging.getLogger(__name__)
 
 
 class GroundedSAM(Model):
@@ -77,12 +81,20 @@ class GroundedSAM(Model):
         """
         reference_batch = Batch.collate(reference)
         self.category_mapping = {}
+        has_background = False
         for sample in reference_batch.samples:
             for category_id, category in zip(sample.category_ids, sample.categories, strict=False):
                 if int(category_id) == BACKGROUND_CATEGORY_ID:
+                    has_background = True
                     continue
                 if category not in self.category_mapping:
                     self.category_mapping[category] = int(category_id)
+        if has_background:
+            logger.warning(
+                "GroundedSAM does not support negative prompts. "
+                "Background masks will be ignored. Use Matcher, PerDino, "
+                "SoftMatcher, or SAM3 for negative prompt support.",
+            )
 
     def predict(self, target: Collatable) -> list[dict[str, torch.Tensor]]:
         """Perform inference step on the target images.

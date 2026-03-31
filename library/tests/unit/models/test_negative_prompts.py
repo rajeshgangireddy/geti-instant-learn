@@ -6,6 +6,7 @@
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
 
 from instantlearn.data.base.batch import Batch
@@ -206,6 +207,31 @@ class TestGroundedSAMNegativePrompts:
         assert "bag" in model.category_mapping
         assert model.category_mapping["shoe"] == 1
         assert model.category_mapping["bag"] == 2
+
+    @patch("instantlearn.models.grounded_sam.grounded_sam.load_sam_model")
+    @patch("instantlearn.models.grounded_sam.grounded_sam.TextToBoxPromptGenerator")
+    def test_grounded_sam_warns_on_background_masks(
+        self,
+        mock_prompt_gen: MagicMock,
+        mock_sam: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Test that fit() logs a warning when background masks are provided."""
+        import logging
+
+        from instantlearn.models.grounded_sam import GroundedSAM
+
+        model = GroundedSAM(device="cpu")
+
+        ref = Sample(
+            image=np.random.default_rng(42).integers(0, 255, (64, 64, 3), dtype=np.uint8),
+            categories=["shoe", "background"],
+            category_ids=np.array([1, BACKGROUND_CATEGORY_ID]),
+        )
+        with caplog.at_level(logging.WARNING):
+            model.fit(ref)
+
+        assert any("does not support negative prompts" in r.message for r in caplog.records)
 
 
 class TestSAM3NegativePrompts:
