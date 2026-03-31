@@ -306,6 +306,56 @@ class SAM3(Model):
             reference_batch: Batch of reference samples.
         """
         self.category_mapping = self._build_category_mapping(reference_batch)
+        self._pre_encode_negative_geometry(reference_batch)
+
+    def _pre_encode_negative_geometry(self, reference_batch: Batch) -> None:
+        """Pre-encode negative points using reference image vision features.
+
+        Encodes the cached negative points against the reference image so that
+        cross-image transfer uses visual content from the reference rather than
+        spatial coordinates that may not transfer to different target images.
+
+        Args:
+            reference_batch: Batch of reference samples with images.
+        """
+        self._negative_geometry_features = None
+        self._negative_geometry_mask = None
+
+        if self._negative_points is None or self._negative_points.numel() == 0:
+            return
+
+        # Find the first reference sample with an image
+        ref_sample = next((s for s in reference_batch.samples if s.image is not None), None)
+        if ref_sample is None:
+            return
+
+        image_tensor = ref_sample.image.unsqueeze(0) if ref_sample.image.ndim == 3 else ref_sample.image
+        pixel_values, _ = self.image_preprocessor(image_tensor.to(self.device))
+        vision_embeds = self.model.get_vision_features(pixel_values)
+        fpn_hidden_states = vision_embeds["fpn_hidden_states"][:-1]
+        fpn_position_encoding = vision_embeds["fpn_position_encoding"][:-1]
+
+        neg_pts = self._negative_points.unsqueeze(0).to(dtype=fpn_hidden_states[0].dtype)
+        num_neg = neg_pts.shape[1]
+        neg_labels = torch.zeros((1, num_neg), dtype=torch.long, device=self.device)
+        neg_mask = torch.ones(1, num_neg, dtype=torch.bool, device=self.device)
+
+        geometry_outputs = self.model.geometry_encoder(
+            point_embeddings=neg_pts,
+            point_mask=neg_mask,
+            point_labels=neg_labels,
+            img_feats=fpn_hidden_states,
+            img_pos_embeds=fpn_position_encoding,
+            drop_spatial_bias=True,
+        )
+
+        self._negative_geometry_features = geometry_outputs["last_hidden_state"]
+        self._negative_geometry_mask = geometry_outputs["attention_mask"]
+        logger.info(
+            "Pre-encoded %d negative points into geometry features [%s]",
+            num_neg,
+            self._negative_geometry_features.shape,
+        )
 
     def _fit_visual_exemplar(self, reference_batch: Batch) -> None:
         """Encode visual exemplar features from reference images and boxes/points.
@@ -606,26 +656,64 @@ class SAM3(Model):
                     _, input_points = self.prompt_preprocessor(original_sizes, input_points=point)
                     input_points_labels = torch.ones((1, 1), dtype=torch.long, device=self.device)
 
-                # Inject cached negative points (label=0) alongside any positive points
-                if self._negative_points is not None and self._negative_points.numel() > 0:
-                    neg_pts = self._negative_points.unsqueeze(0).to(self.device)  # [1, M, 2]
-                    neg_labels = torch.zeros((1, neg_pts.shape[1]), dtype=torch.long, device=self.device)
-                    if input_points is not None:
-                        input_points = torch.cat([input_points, neg_pts], dim=1)
-                        input_points_labels = torch.cat([input_points_labels, neg_labels], dim=1)
+                # Build precomputed geometry features from positive prompts + cached negatives
+                precomputed_geo = None
+                precomputed_geo_mask = None
+
+                # Encode positive points/boxes on the target image (if any)
+                has_positive_geo = (input_boxes is not None and input_boxes.numel() > 0) or (
+                    input_points is not None and input_points.numel() > 0
+                )
+                if has_positive_geo:
+                    fpn_hidden_states = vision_embeds["fpn_hidden_states"][:-1]
+                    fpn_position_encoding = vision_embeds["fpn_position_encoding"][:-1]
+                    dtype = fpn_hidden_states[0].dtype
+
+                    geo_kwargs: dict = {
+                        "img_feats": fpn_hidden_states,
+                        "img_pos_embeds": fpn_position_encoding,
+                    }
+                    if input_points is not None and input_points.numel() > 0:
+                        geo_kwargs["point_embeddings"] = input_points.to(dtype=dtype)
+                        geo_kwargs["point_mask"] = torch.ones(
+                            1,
+                            input_points.shape[1],
+                            dtype=torch.bool,
+                            device=self.device,
+                        )
+                        geo_kwargs["point_labels"] = input_points_labels
+                    if input_boxes is not None and input_boxes.numel() > 0:
+                        geo_kwargs["box_embeddings"] = input_boxes.to(dtype=dtype)
+                        geo_kwargs["box_mask"] = torch.ones(
+                            1,
+                            input_boxes.shape[1],
+                            dtype=torch.bool,
+                            device=self.device,
+                        )
+                        geo_kwargs["box_labels"] = input_boxes_labels
+
+                    geo_out = self.model.geometry_encoder(**geo_kwargs)
+                    precomputed_geo = geo_out["last_hidden_state"]
+                    precomputed_geo_mask = geo_out["attention_mask"]
+
+                # Append cached negative geometry features (pre-encoded on reference image)
+                if self._negative_geometry_features is not None:
+                    neg_geo = self._negative_geometry_features
+                    neg_mask = self._negative_geometry_mask
+                    if precomputed_geo is not None:
+                        precomputed_geo = torch.cat([precomputed_geo, neg_geo], dim=1)
+                        precomputed_geo_mask = torch.cat([precomputed_geo_mask, neg_mask], dim=1)
                     else:
-                        input_points = neg_pts
-                        input_points_labels = neg_labels
+                        precomputed_geo = neg_geo
+                        precomputed_geo_mask = neg_mask
 
                 with torch.no_grad():
                     outputs = self.model(
                         vision_embeds=vision_embeds,
                         input_ids=input_ids,
                         attention_mask=attention_mask,
-                        input_boxes=input_boxes,
-                        input_boxes_labels=input_boxes_labels,
-                        input_points=input_points,
-                        input_points_labels=input_points_labels,
+                        precomputed_geometry_features=precomputed_geo,
+                        precomputed_geometry_mask=precomputed_geo_mask,
                     )
 
                 # Postprocess
