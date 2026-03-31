@@ -18,8 +18,9 @@ from instantlearn.data.utils.image import read_image, read_mask
 #: Reserved category name for background / negative masks.
 BACKGROUND_CATEGORY: str = "background"
 
-#: Reserved category ID for background / negative masks (COCO convention).
-BACKGROUND_CATEGORY_ID: int = 0
+#: Reserved category ID for background / negative masks.
+#: Uses -1 to avoid collision with auto-generated category_ids [0, 1, 2, ...].
+BACKGROUND_CATEGORY_ID: int = -1
 
 
 @dataclass
