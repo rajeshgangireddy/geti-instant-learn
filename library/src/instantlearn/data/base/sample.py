@@ -105,6 +105,18 @@ class Sample:
         if self.category_ids is None:
             self.category_ids = list(range(len(self.categories)))
 
+    @staticmethod
+    def _index_select(
+        data: list | np.ndarray | torch.Tensor | None,
+        indices: list[int],
+    ) -> list | np.ndarray | torch.Tensor | None:
+        """Select elements at the given indices from a data field."""
+        if data is None:
+            return None
+        if isinstance(data, (np.ndarray, torch.Tensor)):
+            return data[indices]
+        return [data[i] for i in indices]
+
     def filter_by_category(self, category_name: str) -> "Sample | None":
         """Return a new Sample containing only instances matching the given category.
 
@@ -138,22 +150,17 @@ class Sample:
         if not indices:
             return None
 
-        def _select(data: list | np.ndarray | torch.Tensor | None) -> list | np.ndarray | torch.Tensor | None:
-            if data is None:
-                return None
-            if isinstance(data, (np.ndarray, torch.Tensor)):
-                return data[indices]
-            return [data[i] for i in indices]
-
         return Sample(
             image=self.image,
             image_path=self.image_path,
             categories=[self.categories[i] for i in indices],
-            category_ids=_select(self.category_ids),
-            masks=_select(self.masks),
-            bboxes=_select(self.bboxes),
-            points=_select(self.points),
-            scores=_select(self.scores),
+            category_ids=self._index_select(self.category_ids, indices),
+            masks=self._index_select(self.masks, indices),
+            bboxes=self._index_select(self.bboxes, indices),
+            points=self._index_select(self.points, indices),
+            scores=self._index_select(self.scores, indices),
+            is_reference=self._index_select(self.is_reference, indices) or [False],
+            n_shot=self._index_select(self.n_shot, indices) or [-1],
         )
 
     def has_background(self) -> bool:
@@ -189,24 +196,17 @@ class Sample:
             if not indices:
                 return None
 
-            def _sel(data: list | np.ndarray | torch.Tensor | None) -> list | np.ndarray | torch.Tensor | None:
-                if data is None:
-                    return None
-                if isinstance(data, (np.ndarray, torch.Tensor)):
-                    return data[indices]
-                return [data[i] for i in indices]
-
             return Sample(
                 image=self.image,
                 image_path=self.image_path,
                 categories=[self.categories[i] for i in indices],
-                category_ids=_sel(self.category_ids),
-                masks=_sel(self.masks),
-                bboxes=_sel(self.bboxes),
-                points=_sel(self.points),
-                scores=_sel(self.scores),
-                is_reference=[self.is_reference[i] for i in indices] if self.is_reference else [False],
-                n_shot=[self.n_shot[i] for i in indices] if self.n_shot else [-1],
+                category_ids=self._index_select(self.category_ids, indices),
+                masks=self._index_select(self.masks, indices),
+                bboxes=self._index_select(self.bboxes, indices),
+                points=self._index_select(self.points, indices),
+                scores=self._index_select(self.scores, indices),
+                is_reference=self._index_select(self.is_reference, indices) or [False],
+                n_shot=self._index_select(self.n_shot, indices) or [-1],
             )
 
         return _make_sample(fg_indices), _make_sample(bg_indices)

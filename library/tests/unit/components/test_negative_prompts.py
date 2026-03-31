@@ -102,4 +102,4 @@ class TestNegativeMaskToPoints:
         points, labels = converter(mask)
 
         assert points.dtype == torch.float32
-        assert labels.dtype == torch.float32
+        assert labels.dtype == torch.long

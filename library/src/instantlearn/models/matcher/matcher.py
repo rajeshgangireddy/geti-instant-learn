@@ -19,8 +19,9 @@ from instantlearn.components.postprocessing import (
 )
 from instantlearn.components.sam import SamDecoder, load_sam_model
 from instantlearn.data.base.batch import Batch, Collatable
-from instantlearn.data.base.sample import BACKGROUND_CATEGORY_ID, Sample
+from instantlearn.data.base.sample import Sample
 from instantlearn.models.base import Model
+from instantlearn.models.negative_embedding import NegativeEmbeddingMixin
 from instantlearn.utils.constants import Backend, SAMModelName
 
 from .prompt_generators import BidirectionalPromptGenerator
@@ -135,7 +136,7 @@ class MatcherInferenceGraph(nn.Module):
         return masks, scores, labels
 
 
-class Matcher(Model):
+class Matcher(NegativeEmbeddingMixin, Model):
     """Matcher model for one-shot segmentation.
 
     Based on "[ICLR'24] Matcher: Segment Anything with One Shot Using All-Purpose Feature Matching"
@@ -259,7 +260,6 @@ class Matcher(Model):
 
         # Negative mask handling
         self.negative_mask_converter = NegativeMaskToPoints(num_points_per_mask=num_negative_points)
-        self._negative_points: torch.Tensor | None = None  # (M, 2) cached during fit (SAM3 compat)
         self._negative_embedding: torch.Tensor | None = None  # (1, embed_dim) cached during fit
 
         # Reference features (set during fit)
@@ -293,42 +293,6 @@ class Matcher(Model):
             reference_batch.category_ids,
         )
         return self.ref_features
-
-    def _extract_negative_embedding(
-        self,
-        embeddings: torch.Tensor,
-        batch: Batch,
-    ) -> torch.Tensor | None:
-        """Extract averaged feature embedding from background mask regions.
-
-        Pools background masks to the patch grid and averages the corresponding
-        encoder features. The result represents "what NOT to match" in feature space.
-
-        Args:
-            embeddings: Encoder features [B, num_patches, embed_dim].
-            batch: Reference batch potentially containing background masks.
-
-        Returns:
-            Normalized negative embedding (1, embed_dim), or None.
-        """
-        neg_embeds: list[torch.Tensor] = []
-        for idx, sample in enumerate(batch.samples):
-            if sample.masks is None or sample.category_ids is None:
-                continue
-            embed = embeddings[idx]  # [num_patches, embed_dim]
-            for cid, mask in zip(sample.category_ids, sample.masks, strict=False):
-                val = int(cid.item()) if isinstance(cid, torch.Tensor) else int(cid)
-                if val != BACKGROUND_CATEGORY_ID:
-                    continue
-                pooled = self.masked_feature_extractor.transform(mask).to(embed.device)
-                keep = pooled.flatten().bool()
-                if keep.any():
-                    neg_embeds.append(embed[keep])
-        if not neg_embeds:
-            return None
-        combined = torch.cat(neg_embeds, dim=0)  # [N, embed_dim]
-        avg = combined.mean(dim=0, keepdim=True)  # [1, embed_dim]
-        return functional.normalize(avg, p=2, dim=-1)
 
     def predict(self, target: Collatable) -> list[dict[str, torch.Tensor]]:
         """Predict masks for target images.
@@ -386,44 +350,6 @@ class Matcher(Model):
             similarities=similarities,
         )
         return self.apply_postprocessing(predictions)
-
-    def _adjust_similarities(
-        self,
-        similarities: torch.Tensor,
-        target_embeddings: torch.Tensor,
-    ) -> torch.Tensor:
-        """Suppress target regions that resemble the negative reference.
-
-        Computes a per-target "negative similarity map" and subtracts its
-        mean-centered version from each category's similarity map.  Mean-centering
-        removes the constant baseline similarity that every patch shares with the
-        (often very general) negative embedding, so only patches that are *more*
-        background-like than average get penalized.
-
-        Args:
-            similarities: [T, C, feat_size, feat_size] per-category similarity maps.
-            target_embeddings: [T, num_patches, embed_dim] target features.
-
-        Returns:
-            Adjusted similarities with above-average negative contribution subtracted.
-        """
-        neg_embed = self._negative_embedding  # (1, embed_dim)
-        if neg_embed is None:
-            return similarities
-
-        feat_size = similarities.shape[-1]
-        neg_embed = neg_embed.to(device=similarities.device, dtype=similarities.dtype)
-
-        for t in range(similarities.shape[0]):
-            target_embed = target_embeddings[t]  # [num_patches, embed_dim]
-            neg_sim = (neg_embed @ target_embed.T).reshape(feat_size, feat_size)
-            # Only penalize patches with above-average negative similarity;
-            # this keeps absolute scores stable for true positive regions.
-            penalty = torch.relu(neg_sim - neg_sim.mean())
-            for c in range(similarities.shape[1]):
-                similarities[t, c] = similarities[t, c] - penalty
-
-        return similarities
 
     @torch.no_grad()
     def export(

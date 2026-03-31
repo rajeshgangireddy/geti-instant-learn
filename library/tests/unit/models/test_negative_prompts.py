@@ -49,7 +49,6 @@ class TestMatcherNegativePrompts:
         model = Matcher(device="cpu")
         assert hasattr(model, "negative_mask_converter")
         assert isinstance(model.negative_mask_converter, NegativeMaskToPoints)
-        assert model._negative_points is None
 
     @patch("instantlearn.models.matcher.matcher.load_sam_model")
     @patch("instantlearn.models.matcher.matcher.ImageEncoder")
@@ -292,3 +291,35 @@ class TestSAM3NegativePrompts:
         model._extract_negative_points(batch)
 
         assert model._negative_points is None
+
+    @patch("instantlearn.models.sam3.sam3.CLIPTokenizerFast")
+    @patch("instantlearn.models.sam3.sam3.Sam3Model")
+    def test_sam3_geometry_attrs_safe_without_background(
+        self,
+        mock_model: MagicMock,
+        mock_tokenizer: MagicMock,
+    ) -> None:
+        """Test that _negative_geometry_features is None when no background masks exist.
+
+        Verifies the __init__ initialization so that predict() can safely check
+        ``if self._negative_geometry_features is not None`` without AttributeError.
+        """
+        from instantlearn.models.sam3.sam3 import SAM3
+
+        model = SAM3(device="cpu")
+
+        assert model._negative_geometry_features is None
+        assert model._negative_geometry_mask is None
+
+        # After fit() with no background, they should still be None
+        ref = Sample(
+            image=np.random.default_rng(42).integers(0, 255, (64, 64, 3), dtype=np.uint8),
+            masks=np.ones((1, 64, 64), dtype=np.uint8),
+            categories=["shoe"],
+            category_ids=np.array([1]),
+        )
+        batch = Batch.collate([ref])
+        model._extract_negative_points(batch)
+
+        assert model._negative_geometry_features is None
+        assert model._negative_geometry_mask is None

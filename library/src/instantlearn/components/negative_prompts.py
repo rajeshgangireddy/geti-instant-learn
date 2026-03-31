@@ -82,5 +82,5 @@ class NegativeMaskToPoints(nn.Module):
         else:
             points = torch.empty(0, 2, device=negative_masks.device, dtype=torch.float32)
 
-        labels = torch.zeros(points.shape[0], device=points.device, dtype=torch.float32)
+        labels = torch.zeros(points.shape[0], device=points.device, dtype=torch.long)
         return points, labels

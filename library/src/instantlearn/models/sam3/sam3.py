@@ -56,6 +56,17 @@ class SAM3(Model):
 
     NOTE: Currently, SAM3 does not work well with torch.bfloat16 precision.
 
+    Negative Prompts:
+        Background masks (``category_id == BACKGROUND_CATEGORY_ID``) provided
+        during ``fit()`` are converted to negative point prompts and pre-encoded
+        against the reference image. These geometry features are then concatenated
+        with positive prompts during ``predict()`` to suppress false positives.
+
+        **Limitation**: When the reference and target images differ significantly
+        in resolution or composition (e.g. 2500×2500 reference vs 680×540 target),
+        the transferred negative features may be less effective at suppressing
+        marginal detections. This is inherent to SAM3's cross-image transfer.
+
     Prompt Modes:
         **CLASSIC** (default): Original SAM3 behavior. Text/box prompts are
         provided per target image. ``fit()`` only stores category names.
@@ -191,6 +202,8 @@ class SAM3(Model):
         # Negative prompt support
         self.negative_mask_converter = NegativeMaskToPoints(num_points_per_mask=num_negative_points)
         self._negative_points: torch.Tensor | None = None
+        self._negative_geometry_features: torch.Tensor | None = None
+        self._negative_geometry_mask: torch.Tensor | None = None
 
         # Preprocessors and postprocessor
         self.image_preprocessor = Sam3Preprocessor(target_size=resolution).to(device)
@@ -279,7 +292,7 @@ class SAM3(Model):
             if sample.masks is None or sample.category_ids is None:
                 continue
 
-            for mask, cat_id in zip(sample.masks, sample.category_ids, strict=False):
+            for mask, cat_id in zip(sample.masks, sample.category_ids, strict=True):
                 if int(cat_id) != BACKGROUND_CATEGORY_ID:
                     continue
                 mask_t = torch.as_tensor(mask, dtype=torch.bool, device=self.device)

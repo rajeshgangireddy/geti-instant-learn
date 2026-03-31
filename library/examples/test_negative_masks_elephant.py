@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import time
 
 import cv2
@@ -30,7 +31,7 @@ from instantlearn.data.base.sample import BACKGROUND_CATEGORY, BACKGROUND_CATEGO
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
-DATASET_DIR = "/home/rgangire/workspace/data/prompt/PerSeg"
+DATASET_DIR = os.environ.get("PERSEG_DIR", "data/PerSeg")
 CATEGORY = "elephant"
 
 

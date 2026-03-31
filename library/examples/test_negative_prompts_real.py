@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from pathlib import Path
 
 import cv2
@@ -30,7 +31,7 @@ from instantlearn.data.base.sample import BACKGROUND_CATEGORY, BACKGROUND_CATEGO
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
-DATASET_DIR = Path("/home/rgangire/workspace/data/prompt/geti_datasets/COCO")
+DATASET_DIR = Path(os.environ.get("COCO_DIR", "data/COCO"))
 
 
 def load_coco_dataset(dataset_dir: Path) -> dict:
