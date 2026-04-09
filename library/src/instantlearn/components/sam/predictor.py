@@ -3,7 +3,6 @@
 
 """PyTorch backend implementation for SAM predictor."""
 
-import warnings
 from logging import getLogger
 from pathlib import Path
 from types import MethodType
@@ -68,14 +67,6 @@ def load_sam_model(
         ...     device="cuda",
         ... )
     """
-    if sam == SAMModelName.SAM_HQ_TINY:
-        warnings.warn(
-            "SAM_HQ_TINY is deprecated due to GPU non-determinism. "
-            "Use SAM_HQ_BASE instead. SAM_HQ_TINY will be removed in a future release.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
     if sam not in MODEL_MAP:
         msg = f"Invalid model type: {sam}"
         raise ValueError(msg)
@@ -406,6 +397,11 @@ class SAMPredictor(nn.Module):
         else:
             msg = f"Model {sam_model_name} not implemented"
             raise NotImplementedError(msg)
+
+    @property
+    def sam_model_name(self) -> SAMModelName:
+        """Return the SAM model variant used by this predictor."""
+        return self._sam_model_name
 
     def _patch_prompt_encoder(self, device: str) -> None:
         """Replace prompt encoder with ONNX-compatible version.

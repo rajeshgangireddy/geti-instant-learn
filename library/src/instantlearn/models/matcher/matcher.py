@@ -384,10 +384,18 @@ class Matcher(Model):
         Raises:
             ImportError: If OpenVINO is selected but not installed.
             RuntimeError: If fit() has not been called before predict().
+            ValueError: If SAM-HQ-Tiny is used with OpenVINO backend.
         """
         if self.ref_features is None:
             msg = "No reference features. Call fit() first."
             raise RuntimeError(msg)
+
+        if Backend(backend) == Backend.OPENVINO and self.sam_predictor.sam_model_name == SAMModelName.SAM_HQ_TINY:
+            msg = (
+                "SAM-HQ-Tiny is not compatible with OpenVINO export due to GPU non-determinism. "
+                "Use SAM_HQ_BASE or SAM_HQ_LARGE instead."
+            )
+            raise ValueError(msg)
 
         export_path = Path(export_dir)
         export_path.mkdir(parents=True, exist_ok=True)

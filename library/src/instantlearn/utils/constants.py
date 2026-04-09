@@ -25,9 +25,7 @@ class SAMModelName(StrEnum):
     SAM_HQ_BASE = "SAM-HQ-base"
     SAM_HQ_LARGE = "SAM-HQ-large"
     SAM_HQ = "SAM-HQ"
-    # SAM-HQ-Tiny is deprecated and not suggested to be
-    # used due to poor results and openvino gpu issues.
-    SAM_HQ_TINY = "SAM-HQ-tiny"
+    SAM_HQ_TINY = "SAM-HQ-tiny"  # Not compatible with OpenVINO export
     SAM2_TINY = "SAM2-tiny"
     SAM2_SMALL = "SAM2-small"
     SAM2_BASE = "SAM2-base"

@@ -24,6 +24,7 @@ ALLOWED_SAM_MODELS: tuple[SAMModelName, ...] = (
     SAMModelName.SAM_HQ,
     SAMModelName.SAM_HQ_BASE,
     SAMModelName.SAM_HQ_LARGE,
+    SAMModelName.SAM_HQ_TINY,
 )
 
 
