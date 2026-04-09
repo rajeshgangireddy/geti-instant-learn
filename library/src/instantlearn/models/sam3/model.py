@@ -1043,7 +1043,7 @@ class Sam3Model(nn.Module):
     ) -> "Sam3Model":
         """Load a pretrained SAM3 model from HuggingFace Hub or local path.
 
-        Loads from sam3.pt (original Facebook format) and converts to HuggingFace format.
+        Loads the SAM3.1 checkpoint (sam3.1_multiplex.pt) and converts to HuggingFace format.
 
         Args:
             pretrained_model_name_or_path: HuggingFace model ID or local path.
