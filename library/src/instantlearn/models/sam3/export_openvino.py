@@ -7,7 +7,7 @@ Each wrapper class isolates a portion of ``Sam3Model`` into a standalone
 ``nn.Module`` with a clean ``forward()`` signature that can be exported
 with ``torch.onnx.export()``.
 
-The 4-model split is designed for maximum flexibility:
+The 5-model split is designed for maximum flexibility:
 
 1. **Vision encoder** — ViT backbone + FPN neck.
 2. **Text encoder** — CLIP text encoder + linear projection.

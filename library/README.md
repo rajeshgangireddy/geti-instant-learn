@@ -27,7 +27,7 @@ uv sync --extra dev
 # Install notebook support
 uv sync --extra notebook
 
-# Install quantization tools (NNCF)
+# Install quantization tools (NNCF) - only required when needed to run model conversion (quantisation)scripts 
 uv sync --extra quantize
 
 # Install all dependencies
