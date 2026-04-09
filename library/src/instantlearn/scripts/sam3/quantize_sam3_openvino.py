@@ -3,42 +3,22 @@
 
 """Quantize SAM3 models to INT8/INT4 for faster inference with OpenVINO.
 
-Supports two quantization paths:
-
-**Path A — Pre-quantized ONNX from usls:**
-  Download Q8, Q4F16, or BNB4 ONNX models from the usls project.
-  These are kept as ONNX files (OpenVINO loads them directly).
-  Converting quantized ONNX to IR inflates weights, so ONNX is preferred.
-
-**Path B — NNCF weight compression:**
-  Apply INT8 or INT4 weight compression to existing FP16 OpenVINO IR models
-  using OpenVINO's NNCF framework. Produces proper OpenVINO IR with
-  compressed weights. No calibration data needed.
+Applies NNCF weight compression (INT8 or INT4) to existing FP16 OpenVINO IR
+models.  Produces proper OpenVINO IR with compressed weights.  No calibration
+data is needed.
 
 Usage:
-    # Download Q8 ONNX models (kept as ONNX — ~845 MB)
-    python quantize_sam3_openvino.py --method q8 --output-dir ./sam3-openvino
-
-    # Download Q4F16 ONNX models (~564 MB)
-    python quantize_sam3_openvino.py --method q4f16 --output-dir ./sam3-openvino
-
-    # Download BNB4 ONNX models (~688 MB)
-    python quantize_sam3_openvino.py --method bnb4 --output-dir ./sam3-openvino
-
-    # Apply NNCF INT8 weight compression to FP16 IR → proper IR output
+    # Apply NNCF INT8 weight compression to FP16 IR
     python quantize_sam3_openvino.py --method nncf-int8 --source-dir ./sam3-openvino/openvino-fp16
 
-    # Apply NNCF INT4 weight compression to FP16 IR → proper IR output
+    # Apply NNCF INT4 weight compression to FP16 IR
     python quantize_sam3_openvino.py --method nncf-int4 --source-dir ./sam3-openvino/openvino-fp16
 
-    # Download all usls variants at once
-    python quantize_sam3_openvino.py --method all-usls --output-dir ./sam3-openvino
-
-    # Run all methods (usls + NNCF) and compare sizes
+    # Run all NNCF methods and compare sizes
     python quantize_sam3_openvino.py --method all --source-dir ./sam3-openvino/openvino-fp16
 
     # Validate quantized models
-    python quantize_sam3_openvino.py --method q8 --validate
+    python quantize_sam3_openvino.py --method nncf-int8 --source-dir ./sam3-openvino/openvino-fp16 --validate
 """
 
 import argparse

@@ -245,7 +245,7 @@ def validate_openvino_models(  # noqa: PLR0915
 def main() -> None:
     """CLI entry point for SAM3 PyTorch → ONNX → OpenVINO export."""
     parser = argparse.ArgumentParser(
-        description="Export SAM3 PyTorch model to OpenVINO IR via ONNX (4-model split).",
+        description="Export SAM3 PyTorch model to OpenVINO IR via ONNX (5-model split).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

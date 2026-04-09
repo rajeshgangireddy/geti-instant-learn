@@ -49,7 +49,7 @@ Usage:
     python scripts/benchmark_sam3_openvino.py
 
     # Auto-download INT8 quantised variant
-    python scripts/benchmark_sam3_openvino.py --variants openvino-fp16
+    python scripts/benchmark_sam3_openvino.py --variants openvino-int8
 
     # Use local model directory instead of HuggingFace
     python scripts/benchmark_sam3_openvino.py --base-dir ./sam3-openvino
@@ -81,9 +81,6 @@ from rich.console import Console
 from rich.table import Table
 from transformers import CLIPTokenizerFast
 
-# ---------------------------------------------------------------------------
-# Local imports — preprocessing / postprocessing from the library
-# ---------------------------------------------------------------------------
 from instantlearn.models.sam3.processing import (
     Sam3Postprocessor,
     Sam3Preprocessor,
@@ -92,10 +89,6 @@ from instantlearn.models.sam3.processing import (
 
 logger = logging.getLogger(__name__)
 console = Console()
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
 
 RESOLUTION = 1008
 
@@ -187,9 +180,7 @@ def _resolve_variant_path(base_dir: Path | None, variant: str) -> Path | None:
         return None
 
 
-# ---------------------------------------------------------------------------
-# Data classes for results
-# ---------------------------------------------------------------------------
+
 @dataclass
 class TimingResult:
     """Timing for a single inference run broken down by component."""
@@ -245,9 +236,7 @@ class BenchmarkResult:
         }
 
 
-# ---------------------------------------------------------------------------
-# Model loader with configurable compile properties
-# ---------------------------------------------------------------------------
+
 class BenchmarkModel:
     """Lightweight model wrapper for benchmarking individual components."""
 
@@ -318,8 +307,6 @@ class BenchmarkModel:
             return variants[0]
         msg = f"Model '{name}' not found in {model_dir}"
         raise FileNotFoundError(msg)
-
-    # ---- Sub-model runners returning elapsed ms ----
 
     def run_preprocess(
         self,
@@ -428,10 +415,6 @@ class BenchmarkModel:
         return result[0], elapsed
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 
 def _pad_or_truncate(arr: np.ndarray, target_len: int) -> np.ndarray:
     """Pad or truncate array to target sequence length."""
@@ -490,10 +473,6 @@ def _real_box(
     labels = np.ones((1, boxes.shape[1]), dtype=np.int64)
     return boxes, labels
 
-
-# ---------------------------------------------------------------------------
-# Benchmark runners
-# ---------------------------------------------------------------------------
 
 
 def benchmark_single_inference(
@@ -677,10 +656,6 @@ def benchmark_live_stream(
     return results
 
 
-# ---------------------------------------------------------------------------
-# Main benchmark orchestrator
-# ---------------------------------------------------------------------------
-
 
 def _benchmark_variant_config(
     model: BenchmarkModel,
@@ -696,7 +671,6 @@ def _benchmark_variant_config(
     """Run all benchmarks for one variant + config combination."""
     results: list[BenchmarkResult] = []
 
-    # --- Per-prompt-type benchmarks ---
     for prompt_label, text, bbox in prompt_configs:
         console.print(f"  [green]{prompt_label}[/green] prompt — warmup({warmup}) + measure({iterations})")
 
@@ -731,7 +705,6 @@ def _benchmark_variant_config(
         cached_result.timings = cached_timings
         results.append(cached_result)
 
-    # --- Live stream benchmark (text prompt, multiple images) ---
     console.print(f"  [green]live-stream[/green] — warmup({warmup}) + measure({live_frames})")
 
     # Warmup
@@ -844,10 +817,6 @@ def run_benchmarks(
 
     return all_results
 
-
-# ---------------------------------------------------------------------------
-# Result display
-# ---------------------------------------------------------------------------
 
 
 def print_summary_table(results: list[BenchmarkResult]) -> None:
@@ -1051,10 +1020,6 @@ def print_live_fps_table(results: list[BenchmarkResult]) -> None:
     console.print(table)
 
 
-# ---------------------------------------------------------------------------
-# Device info & results export
-# ---------------------------------------------------------------------------
-
 
 def _get_device_full_name(device: str) -> str:
     """Get the full device name as reported by OpenVINO.
@@ -1210,7 +1175,7 @@ def _results_to_dataframe(results: list[BenchmarkResult]):  # noqa: ANN202
     Each row represents one (variant, config, prompt_type) combination with
     mean, median, std, min, max for every timing component.
 
-    Requires ``pandas`` (install with ``pip install pandas``).
+    Requires ``pandas`` (install with ``uv pip install pandas``).
 
     Raises:
         ImportError: If ``pandas`` is not installed.
@@ -1218,7 +1183,7 @@ def _results_to_dataframe(results: list[BenchmarkResult]):  # noqa: ANN202
     try:
         import pandas as pd  # noqa: PLC0415
     except ImportError as exc:
-        msg = "pandas is required to export results. Install it with: pip install pandas openpyxl"
+        msg = "pandas is required to export results. Install it with: uv pip install pandas openpyxl"
         raise ImportError(msg) from exc
 
     rows: list[dict[str, object]] = []
@@ -1289,7 +1254,7 @@ def save_results(
     try:
         import pandas as pd  # noqa: PLC0415
     except ImportError as exc:
-        msg = "pandas and openpyxl are required to save results. Install with: pip install pandas openpyxl"
+        msg = "pandas and openpyxl are required to save results. Install with: uv pip install pandas openpyxl"
         raise ImportError(msg) from exc
 
     dataframe = _results_to_dataframe(results)
@@ -1310,10 +1275,6 @@ def save_results(
     console.print(f"  Device: [cyan]{device_name}[/cyan]")
     return filepath
 
-
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 
 def _build_parser() -> argparse.ArgumentParser:

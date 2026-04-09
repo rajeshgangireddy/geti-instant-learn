@@ -193,10 +193,10 @@ class SAM3OpenVINO(Model):
     def __init__(
         self,
         model_dir: str | Path | None = None,
-        device: str = "CPU",
+        device: str = "AUTO",
         confidence_threshold: float = 0.5,
         resolution: int = 1008,
-        prompt_mode: Sam3PromptMode = Sam3PromptMode.CLASSIC,
+        prompt_mode: Sam3PromptMode = Sam3PromptMode.VISUAL_EXEMPLAR,
         drop_spatial_bias: bool = True,
         tokenizer_path: str | Path | None = None,
         variant: SAM3OVVariant = SAM3OVVariant.FP16,
@@ -216,9 +216,9 @@ class SAM3OpenVINO(Model):
             resolution: Input image resolution (must match exported model).
             prompt_mode: ``Sam3PromptMode.CLASSIC`` or
                 ``Sam3PromptMode.VISUAL_EXEMPLAR``.
-            drop_spatial_bias: When True the exemplar geometry encoder drops
-                coordinate projections/position encodings and keeps only pooled
-                visual features (better for cross-image transfer).
+            drop_spatial_bias: Stored for API compatibility but has no
+                runtime effect.  The exemplar geometry encoder already has
+                ``drop_spatial_bias=True`` baked in at export time.
             tokenizer_path: Explicit tokenizer path or HuggingFace model ID.
             variant: Model variant to download when *model_dir* is ``None``.
             repo_id: HuggingFace repository ID for auto-download.
@@ -296,10 +296,6 @@ class SAM3OpenVINO(Model):
         self.tokenizer = self._load_tokenizer(tokenizer_path)
         logger.info("SAM3 OpenVINO model loaded successfully (mode=%s).", prompt_mode.value)
 
-    # ------------------------------------------------------------------
-    # Tokenizer
-    # ------------------------------------------------------------------
-
     def _load_tokenizer(self, tokenizer_path: str | Path | None) -> CLIPTokenizerFast:
         """Load CLIP tokenizer from local path or HuggingFace.
 
@@ -314,10 +310,6 @@ class SAM3OpenVINO(Model):
         if (self.model_dir / "tokenizer.json").exists():
             return CLIPTokenizerFast.from_pretrained(str(self.model_dir))
         return CLIPTokenizerFast.from_pretrained(_DEFAULT_HF_REPO)
-
-    # ------------------------------------------------------------------
-    # Model resolution / download
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _resolve_model_dir(
@@ -362,10 +354,6 @@ class SAM3OpenVINO(Model):
             allow_patterns=[f"{subdir}/*", "tokenizer*", "special_tokens_map*"],
         )
         return Path(cache_dir) / subdir
-
-    # ------------------------------------------------------------------
-    # Sub-model runners
-    # ------------------------------------------------------------------
 
     def _run_vision_encoder(self, pixel_values: np.ndarray) -> dict[str, np.ndarray]:
         """Run vision encoder.
@@ -483,10 +471,6 @@ class SAM3OpenVINO(Model):
             "pred_logits": np.array(self._decoder_request.get_tensor("pred_logits").data),
             "presence_logits": np.array(self._decoder_request.get_tensor("presence_logits").data),
         }
-
-    # ------------------------------------------------------------------
-    # Tokenisation helpers
-    # ------------------------------------------------------------------
 
     def _tokenize(self, text: str) -> tuple[np.ndarray, np.ndarray]:
         """Tokenise a single text prompt and pad/truncate to length 32.
@@ -754,10 +738,14 @@ class SAM3OpenVINO(Model):
                 category_ids = list(self.category_mapping.values())
             else:
                 texts = sample.categories or []
-                category_ids = sample.category_ids
+                category_ids = list(sample.category_ids or [])
                 num_visual = max(len(bboxes), len(points))
-                if num_visual and len(texts) != num_visual:
-                    texts = ["visual"] * num_visual
+                if num_visual:
+                    if len(texts) != num_visual:
+                        texts = ["visual"] * num_visual
+                    if len(category_ids) != num_visual:
+                        default_category_id = category_ids[0] if category_ids else 0
+                        category_ids = [default_category_id] * num_visual
 
             all_masks: list[torch.Tensor] = []
             all_boxes: list[torch.Tensor] = []
@@ -935,10 +923,6 @@ class SAM3OpenVINO(Model):
             results.append(self._aggregate_results(all_masks, all_boxes, all_labels, img_size))
 
         return results
-
-    # ------------------------------------------------------------------
-    # Utilities
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _build_category_mapping(reference_batch: Batch) -> dict[str, int]:
