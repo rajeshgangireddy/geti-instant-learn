@@ -20,7 +20,8 @@ from instantlearn.components.sam import SamDecoder, load_sam_model
 from instantlearn.data.base.batch import Batch, Collatable
 from instantlearn.data.base.sample import Sample
 from instantlearn.models.base import Model
-from instantlearn.utils.constants import Backend, SAMModelName
+from instantlearn.utils.compression import compress_model
+from instantlearn.utils.constants import Backend, CompressionMode, SAMModelName
 
 from .prompt_generators import BidirectionalPromptGenerator
 
@@ -190,6 +191,7 @@ class Matcher(Model):
         confidence_threshold: float | None = 0.38,
         use_mask_refinement: bool = True,
         precision: str = "bf16",
+        compression: str | CompressionMode = CompressionMode.FP32,
         compile_models: bool = False,
         device: str = "cuda",
         postprocessor: PostProcessor | None = None,
@@ -205,6 +207,8 @@ class Matcher(Model):
                                  in the final output. Higher values = stricter filtering, fewer masks.
             use_mask_refinement: Whether to use 2-stage mask refinement with box prompts.
             precision: Model precision ("bf16", "fp32").
+            compression: Weight compression mode for OpenVINO export.
+                See :class:`~instantlearn.utils.constants.CompressionMode` for valid values.
             compile_models: Whether to compile models with torch.compile.
             device: Device for inference.
             postprocessor: Post-processor applied after predict().
@@ -214,6 +218,7 @@ class Matcher(Model):
         if postprocessor is None:
             postprocessor = default_postprocessor()
         super().__init__(postprocessor=postprocessor)
+        self.compression = CompressionMode(compression)
         # SAM predictor
         self.sam_predictor = load_sam_model(
             sam,
@@ -369,14 +374,16 @@ class Matcher(Model):
         self,
         export_dir: str | Path = Path("./exports/matcher"),
         backend: str | Backend = Backend.ONNX,
-        compress_to_fp16: bool = False,
+        compression: str | CompressionMode | None = None,
     ) -> Path:
         """Export model components.
 
         Args:
             export_dir: Directory to save exported models.
             backend: Export backend (ONNX, OpenVINO).
-            compress_to_fp16: Whether to compress OpenVINO model to FP16.
+            compression: Weight compression mode for OpenVINO export.
+                When *None*, falls back to ``self.compression``.
+                See :class:`~instantlearn.utils.constants.CompressionMode`.
 
         Returns:
             Path to export directory.
@@ -386,6 +393,7 @@ class Matcher(Model):
             RuntimeError: If fit() has not been called before predict().
             ValueError: If SAM-HQ-Tiny is used with OpenVINO backend.
         """
+        compression = CompressionMode(compression) if compression is not None else self.compression
         if self.ref_features is None:
             msg = "No reference features. Call fit() first."
             raise RuntimeError(msg)
@@ -503,10 +511,14 @@ class Matcher(Model):
                 input_name = ov_model.inputs[0].get_any_name()
                 ov_model.reshape({input_name: [1, 3, input_size, input_size]})
 
+                # Apply weight compression (INT8/INT4) via NNCF when requested.
+                # FP16 is handled natively by openvino.save_model below.
+                ov_model = compress_model(ov_model, compression)
+
                 openvino.save_model(
                     ov_model,
                     export_path / "matcher.xml",
-                    compress_to_fp16=compress_to_fp16,
+                    compress_to_fp16=(compression == CompressionMode.FP16),
                 )
                 return export_path / "matcher.xml"
             except ImportError as e:

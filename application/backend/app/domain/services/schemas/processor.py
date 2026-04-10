@@ -7,7 +7,7 @@ from typing import Annotated, Any, Literal
 
 import numpy as np
 from instantlearn.components.encoders.timm import AVAILABLE_IMAGE_ENCODERS
-from instantlearn.utils.constants import SAMModelName
+from instantlearn.utils.constants import CompressionMode, SAMModelName
 from pydantic import BaseModel, Field, field_validator
 
 from domain.services.schemas.base import BaseIDPayload, BaseIDSchema, PaginatedResponse
@@ -83,6 +83,20 @@ class MatcherConfig(BaseModelConfig):
     num_background_points: int = Field(default=3, ge=0, lt=10)
     confidence_threshold: float = Field(default=0.38, gt=0.0, lt=1.0)
     use_mask_refinement: bool = Field(default=False)
+    compression: str = Field(
+        default="fp32",
+        description="Weight compression mode for OpenVINO export (fp32, fp16, int8_sym, int8_asym, int4_sym, int4_asym)",
+    )
+
+    @field_validator("compression")
+    @classmethod
+    def validate_compression(cls, v: str) -> str:
+        try:
+            CompressionMode(v)
+        except ValueError:
+            allowed = ", ".join(m.value for m in CompressionMode)
+            raise ValueError(f"Compression mode must be one of [{allowed}], got '{v}'")
+        return v
 
     model_config = {
         "json_schema_extra": {
@@ -92,6 +106,7 @@ class MatcherConfig(BaseModelConfig):
                 "num_background_points": 3,
                 "confidence_threshold": 0.38,
                 "precision": "bf16",
+                "compression": "fp32",
                 "sam_model": "SAM-HQ-base",
                 "encoder_model": "dinov3_small",
                 "use_mask_refinement": False,

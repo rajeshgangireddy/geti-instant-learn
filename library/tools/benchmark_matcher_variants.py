@@ -25,7 +25,7 @@ import torch.nn.functional as F  # noqa: N812
 
 from instantlearn.data import Sample
 from instantlearn.models import Matcher
-from instantlearn.utils.constants import SAMModelName
+from instantlearn.utils.constants import CompressionMode, SAMModelName
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -69,12 +69,13 @@ def benchmark_variant(
     device: str,
     encoder: str = "dinov3_large",
     gpu_iterations: int = 10,
-    compress_fp16: bool = True,
+    compression: CompressionMode = CompressionMode.FP16,
 ) -> dict:
     """Benchmark a single SAM decoder + encoder combination end-to-end."""
     combo_name = f"{variant} + {encoder}"
     result = {
         "variant": combo_name,
+        "compression": compression.value,
         "status": "success",
         "pytorch_time": None,
         "export_time": None,
@@ -115,7 +116,7 @@ def benchmark_variant(
         ov_path = model.export(
             export_dir=export_dir,
             backend="openvino",
-            compress_to_fp16=compress_fp16,
+            compression=compression,
         )
         result["export_time"] = time() - tic
         logger.info(f"[{combo_name}] Export: {result['export_time']:.1f}s → {ov_path}")
@@ -290,7 +291,14 @@ def main() -> None:
         help="DINOv3 encoder variants (e.g., dinov3_small dinov3_large). Default: all encoders.",
     )
     parser.add_argument("--gpu-iterations", type=int, default=10, help="GPU determinism iterations (default: 10)")
-    parser.add_argument("--no-fp16", action="store_true", help="Disable FP16 compression")
+    parser.add_argument("--no-fp16", action="store_true", help="Disable FP16 compression (use FP32 baseline)")
+    parser.add_argument(
+        "--compression",
+        type=str,
+        default=None,
+        choices=[m.value for m in CompressionMode],
+        help="Weight compression mode (overrides --no-fp16). Default: fp16.",
+    )
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -298,6 +306,15 @@ def main() -> None:
 
     sam_variants = [SAMModelName(v) for v in args.sam] if args.sam else ALL_SAM_HQ_VARIANTS
     encoders = args.encoder or ALL_ENCODERS
+
+    # Resolve compression mode from CLI args
+    if args.compression is not None:
+        compression = CompressionMode(args.compression)
+    elif args.no_fp16:
+        compression = CompressionMode.FP32
+    else:
+        compression = CompressionMode.FP16
+    logger.info("Compression mode: %s", compression.value)
 
     combos = [(sam, enc) for sam in sam_variants for enc in encoders]
     logger.info("Testing %d combinations: %d SAM x %d encoders", len(combos), len(sam_variants), len(encoders))
@@ -310,7 +327,7 @@ def main() -> None:
             device=device,
             encoder=encoder,
             gpu_iterations=args.gpu_iterations,
-            compress_fp16=not args.no_fp16,
+            compression=compression,
         )
         results.append(result)
 
