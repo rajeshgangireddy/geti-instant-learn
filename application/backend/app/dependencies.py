@@ -6,11 +6,12 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, Request
 from sqlalchemy.orm import Session
 
 from domain.db.engine import get_session
 from domain.dispatcher import ConfigChangeDispatcher
+from domain.errors import DatasetNotFoundError
 from domain.repositories.frame import FrameRepository
 from domain.repositories.processor import ProcessorRepository
 from domain.repositories.project import ProjectRepository
@@ -26,8 +27,8 @@ from domain.services import (
     SourceService,
 )
 from domain.services.schemas.dataset import DatasetsListSchema
+from domain.services.schemas.device import AvailableDeviceSchema
 from runtime.core.components.validators.sink_connection import SinkConnectionValidator
-from runtime.errors import DatasetNotFoundError
 from runtime.pipeline_manager import PipelineManager
 from runtime.services.frame import FrameService
 from runtime.services.license import LicenseService
@@ -68,6 +69,11 @@ def get_available_datasets(request: Request) -> DatasetsListSchema:
     return available_datasets
 
 
+def get_available_devices(request: Request) -> list[AvailableDeviceSchema]:
+    """Dependency that provides startup-cached available devices list."""
+    return request.app.state.available_devices
+
+
 def get_dataset_path_by_id(
     dataset_id: UUID,
     dataset_paths: Annotated[dict[UUID, Path], Depends(get_dataset_paths)],
@@ -76,10 +82,7 @@ def get_dataset_path_by_id(
     try:
         return dataset_paths[dataset_id]
     except KeyError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Dataset with id '{dataset_id}' was not found.",
-        ) from exc
+        raise DatasetNotFoundError(f"Dataset with id '{dataset_id}' was not found.") from exc
 
 
 # --- DB session dependency ---
@@ -203,3 +206,4 @@ DiscoveryServiceDep = Annotated[SourceTypeService, Depends(get_discovery_service
 LicenseServiceDep = Annotated[LicenseService, Depends(get_license_service)]
 DatasetPathDep = Annotated[Path, Depends(get_dataset_path_by_id)]
 AvailableDatasetsDep = Annotated[DatasetsListSchema, Depends(get_available_datasets)]
+AvailableDevicesDep = Annotated[list[AvailableDeviceSchema], Depends(get_available_devices)]
