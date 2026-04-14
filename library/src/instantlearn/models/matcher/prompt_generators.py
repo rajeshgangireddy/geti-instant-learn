@@ -163,15 +163,16 @@ class BidirectionalPromptGenerator(nn.Module):
         valid_indices = [combined_ref[keep_indices], combined_target[keep_indices]]
         valid_scores = combined_scores[keep_indices]
 
-        log.debug(
-            "[MATCHING] ref_indices=%d, forward_matches=%d, bidir_matches=%d, "
-            "fallback_used=%s, final_points=%d",
-            ref_idx.numel(),
-            fw_scores.numel(),
-            num_bidir,
-            not has_valid.item(),
-            valid_scores.numel(),
-        )
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug(
+                "[MATCHING] ref_indices=%d, forward_matches=%d, bidir_matches=%d, "
+                "fallback_used=%s, final_points=%d",
+                ref_idx.numel(),
+                fw_scores.numel(),
+                num_bidir,
+                ~has_valid,
+                valid_scores.numel(),
+            )
 
         return valid_indices, valid_scores
 
@@ -207,9 +208,12 @@ class BidirectionalPromptGenerator(nn.Module):
         above_threshold = similarity_grid > self.similarity_threshold
         candidates = (above_threshold & is_local_max).flatten()
 
-        # Exclude already-matched indices
+        # Exclude already-matched indices without in-place advanced indexing
+        # (scatter-based approach is safe for ONNX export/tracing)
         if existing_target_indices is not None and existing_target_indices.numel() > 0:
-            candidates[existing_target_indices] = False
+            exclude_mask = torch.zeros_like(candidates)
+            exclude_mask.scatter_(0, existing_target_indices, torch.ones_like(existing_target_indices, dtype=torch.bool))
+            candidates = candidates & ~exclude_mask
 
         indices = candidates.nonzero().squeeze(-1)
         scores = similarity_grid.flatten()[indices]
@@ -221,10 +225,6 @@ class BidirectionalPromptGenerator(nn.Module):
             indices = indices[top_k_idx]
             scores = scores[top_k_idx]
 
-        return indices, scores
-
-        indices = candidates.nonzero().squeeze(-1)
-        scores = similarity_grid.flatten()[indices]
         return indices, scores
 
     def _select_background_points(
@@ -361,6 +361,11 @@ class BidirectionalPromptGenerator(nn.Module):
         y_cell = ((y_coords - y_min) / cell_h).floor().long().clamp(0, self.num_grid_cells - 1)
 
         cell_ids = y_cell * self.num_grid_cells + x_cell
+
+        # Skip grid filtering during ONNX export (data-dependent loops aren't traceable)
+        if torch.onnx.is_in_onnx_export():
+            return foreground_points
+
         unique_cells = torch.unique(cell_ids)
 
         selected = []
@@ -457,12 +462,13 @@ class BidirectionalPromptGenerator(nn.Module):
         fg_before_filter = foreground_points.size(0)
         # Filter to keep only top-scoring foreground points
         foreground_points = self._filter_foreground_points(foreground_points)
-        log.debug(
-            "[PROMPTS] fg_before_filter=%d, fg_after_filter=%d, bg_points=%d",
-            fg_before_filter,
-            foreground_points.size(0),
-            background_indices.numel(),
-        )
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug(
+                "[PROMPTS] fg_before_filter=%d, fg_after_filter=%d, bg_points=%d",
+                fg_before_filter,
+                foreground_points.size(0),
+                background_indices.numel(),
+            )
 
         # Process background points
         background_points = self._extract_point_coordinates([None, background_indices], background_scores)

@@ -218,7 +218,7 @@ class Matcher(Model):
                 Set to None to disable. Default: None.
             num_grid_cells: Grid cells per dimension for spatial diversity filtering.
                 When > 0, foreground points are deduplicated per grid cell before top-k
-                selection, preventing point clustering on large objects. Default: 0.
+                selection, preventing point clustering on large objects. Default: 8.
         """
         if postprocessor is None:
             postprocessor = default_postprocessor()
