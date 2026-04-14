@@ -5,9 +5,9 @@ import logging
 from pathlib import Path
 from uuid import UUID, uuid5
 
+from domain.errors import DatasetNotFoundError
 from domain.services.schemas.base import Pagination
 from domain.services.schemas.dataset import DatasetSchema, DatasetsListSchema
-from runtime.errors import DatasetNotFoundError
 from runtime.services.image_thumbnail import generate_image_thumbnail
 from settings import get_settings
 
@@ -76,7 +76,6 @@ def scan_datasets(datasets_root: Path) -> tuple[DatasetsListSchema, dict[UUID, P
             DatasetSchema(
                 id=dataset_id,
                 name=name,
-                description=f"This is sample dataset of {name.lower()}.",
                 thumbnail=generate_image_thumbnail(first_image) if first_image is not None else None,
             )
         )
