@@ -92,13 +92,9 @@ const MatcherConfiguration = ({ model, onClose }: MatcherConfigurationProps) => 
     const [decoderModel, setDecoderModel] = useState<DecoderModel>(model.config.sam_model);
     const [precision, setPrecision] = useState<Precision>(model.config.precision as Precision);
     const [useMaskRefinement, setUseMaskRefinement] = useState<boolean>(model.config.use_mask_refinement);
-    const [similarityThreshold, setSimilarityThreshold] = useState<number | null>(
-        model.config.similarity_threshold ?? null
-    );
-    const [useSimilarityThreshold, setUseSimilarityThreshold] = useState<boolean>(
+    const [detectSmallObjects, setDetectSmallObjects] = useState<boolean>(
         model.config.similarity_threshold !== null && model.config.similarity_threshold !== undefined
     );
-    const [numberOfGridCells, setNumberOfGridCells] = useState<number>(model.config.num_grid_cells);
 
     const updateModelMutation = useUpdateModel();
 
@@ -110,8 +106,7 @@ const MatcherConfiguration = ({ model, onClose }: MatcherConfigurationProps) => 
         decoderModel === model.config.sam_model &&
         precision === model.config.precision &&
         useMaskRefinement === model.config.use_mask_refinement &&
-        (useSimilarityThreshold ? similarityThreshold : null) === (model.config.similarity_threshold ?? null) &&
-        numberOfGridCells === model.config.num_grid_cells;
+        detectSmallObjects === (model.config.similarity_threshold !== null && model.config.similarity_threshold !== undefined);
 
     const updateModel = (event: FormEvent) => {
         event.preventDefault();
@@ -129,8 +124,8 @@ const MatcherConfiguration = ({ model, onClose }: MatcherConfigurationProps) => 
                     encoder_model: encoderModel,
                     sam_model: decoderModel,
                     use_mask_refinement: useMaskRefinement,
-                    similarity_threshold: useSimilarityThreshold ? similarityThreshold : null,
-                    num_grid_cells: numberOfGridCells,
+                    similarity_threshold: detectSmallObjects ? 0.65 : null,
+                    num_grid_cells: detectSmallObjects ? 8 : model.config.num_grid_cells,
                     precision,
                 },
             },
@@ -179,39 +174,12 @@ const MatcherConfiguration = ({ model, onClose }: MatcherConfigurationProps) => 
                     onChange={setConfidenceThreshold}
                     value={confidenceThreshold}
                 />
-                <NumberField
-                    label={'Number of grid cells'}
-                    minValue={0}
-                    maxValue={100}
-                    step={1}
-                    onChange={setNumberOfGridCells}
-                    value={numberOfGridCells}
-                />
+                <Selection label={'Precision'} value={precision} onChange={setPrecision} items={PRECISIONS} />
                 <Flex alignItems={'center'} width={'100%'} wrap={'wrap'}>
-                    <Switch
-                        isEmphasized
-                        isSelected={useSimilarityThreshold}
-                        onChange={(value) => {
-                            setUseSimilarityThreshold(value);
-                            if (value && similarityThreshold === null) {
-                                setSimilarityThreshold(0.65);
-                            }
-                        }}
-                    >
-                        Use similarity threshold
+                    <Switch isEmphasized isSelected={detectSmallObjects} onChange={setDetectSmallObjects}>
+                        Detect small objects
                     </Switch>
                 </Flex>
-                {useSimilarityThreshold && (
-                    <NumberField
-                        label={'Similarity threshold'}
-                        minValue={0.01}
-                        maxValue={0.99}
-                        step={0.01}
-                        onChange={setSimilarityThreshold}
-                        value={similarityThreshold ?? 0.65}
-                    />
-                )}
-                <Selection label={'Precision'} value={precision} onChange={setPrecision} items={PRECISIONS} />
                 <Flex alignItems={'center'} width={'100%'} wrap={'wrap'}>
                     <Switch isEmphasized isSelected={useMaskRefinement} onChange={setUseMaskRefinement}>
                         Use mask refinement

@@ -180,10 +180,16 @@ class BidirectionalPromptGenerator(nn.Module):
         similarity_grid: torch.Tensor,
         existing_target_indices: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Get additional foreground points from similarity map using threshold.
+        """Get additional foreground points from similarity map using threshold with local peak NMS.
 
-        Selects all target patches whose similarity exceeds self.similarity_threshold,
-        excluding any already selected by bidirectional matching.
+        Instead of returning ALL patches above threshold (which creates many redundant
+        points that produce overlapping SAM masks), returns only local maxima — patches
+        that are the highest-scoring in their 3x3 neighborhood AND above threshold.
+        This naturally deduplicates adjacent patches (e.g., multiple patches covering
+        the same small object) while preserving one representative point per region.
+
+        The result is further capped at num_foreground_points to limit the number of
+        supplementary points and avoid excessive SAM decode calls.
 
         Args:
             similarity_grid: Similarity map [feat_size, feat_size]
@@ -192,15 +198,33 @@ class BidirectionalPromptGenerator(nn.Module):
         Returns:
             tuple of (target_indices [M], scores [M]) for new points
         """
-        flat_sim = similarity_grid.flatten()  # [num_patches]
-        above_threshold = flat_sim > self.similarity_threshold
+        # Local peak NMS: keep only patches that are the max in their 3x3 neighborhood
+        sim_4d = similarity_grid.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+        local_max = torch.nn.functional.max_pool2d(sim_4d, kernel_size=3, stride=1, padding=1)
+        is_local_max = similarity_grid == local_max.squeeze(0).squeeze(0)
+
+        # Combine: must be above threshold AND a local peak
+        above_threshold = similarity_grid > self.similarity_threshold
+        candidates = (above_threshold & is_local_max).flatten()
 
         # Exclude already-matched indices
         if existing_target_indices is not None and existing_target_indices.numel() > 0:
-            above_threshold[existing_target_indices] = False
+            candidates[existing_target_indices] = False
 
-        indices = above_threshold.nonzero().squeeze(-1)
-        scores = flat_sim[indices]
+        indices = candidates.nonzero().squeeze(-1)
+        scores = similarity_grid.flatten()[indices]
+
+        # Cap supplementary points to avoid excessive SAM decode calls.
+        # Uses num_foreground_points as the maximum budget for threshold-based points.
+        if indices.numel() > self.num_foreground_points:
+            _, top_k_idx = torch.topk(scores, self.num_foreground_points)
+            indices = indices[top_k_idx]
+            scores = scores[top_k_idx]
+
+        return indices, scores
+
+        indices = candidates.nonzero().squeeze(-1)
+        scores = similarity_grid.flatten()[indices]
         return indices, scores
 
     def _select_background_points(

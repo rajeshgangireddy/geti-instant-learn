@@ -193,7 +193,7 @@ class Matcher(Model):
         compile_models: bool = False,
         device: str = "cuda",
         postprocessor: PostProcessor | None = None,
-        similarity_threshold: float | None = 0.65,
+        similarity_threshold: float | None = None,
         num_grid_cells: int = 8,
     ) -> None:
         """Initialize the Matcher model.
