@@ -155,3 +155,6 @@ library/**/_autosummary/
 # Benchmark & example outputs
 benchmark_results/
 outputs/
+
+# autodownloaded datasets
+library/datasets/
