@@ -63,8 +63,8 @@ def export_from_pytorch(
     import torch  # noqa: PLC0415
     from transformers import CLIPTokenizerFast  # noqa: PLC0415
 
-    from instantlearn.models.sam3.export_openvino import export_sam3_to_onnx  # noqa: PLC0415
     from instantlearn.models.sam3.model import Sam3Model  # noqa: PLC0415
+    from instantlearn.models.sam3.onnx_export import export_sam3_to_onnx  # noqa: PLC0415
 
     logger.info("Loading Sam3Model from '%s'...", model_id)
     model = Sam3Model.from_pretrained(model_id, device="cpu", dtype=torch.float32)
@@ -106,7 +106,7 @@ def convert_to_openvino(
     Returns:
         Mapping from model name to ``.xml`` path.
     """
-    from instantlearn.models.sam3.export_openvino import convert_onnx_to_openvino  # noqa: PLC0415
+    from instantlearn.models.sam3.onnx_export import convert_onnx_to_openvino  # noqa: PLC0415
 
     compress_to_fp16 = precision == "fp16"
     converted = convert_onnx_to_openvino(

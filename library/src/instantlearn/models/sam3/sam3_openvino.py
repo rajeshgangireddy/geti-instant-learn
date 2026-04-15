@@ -25,7 +25,7 @@ The model expects 5 sub-models (custom-exported from ``Sam3Model``):
 
 See Also:
     - ``SAM3``: PyTorch-based SAM3 model
-    - ``export_openvino``: ONNX export wrappers and conversion utilities
+    - ``onnx_export``: ONNX export wrappers and conversion utilities
     - ``export_sam3_openvino.py``: CLI script for exporting models
 """
 

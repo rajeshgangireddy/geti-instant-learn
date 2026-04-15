@@ -549,7 +549,10 @@ def convert_onnx_to_openvino(
     for name in model_names:
         onnx_path = onnx_dir / f"{name}.onnx"
         if not onnx_path.exists():
-            logger.warning("Skipping %s — ONNX file not found.", onnx_path)
+            # Fall back to fp16-suffixed variant (e.g. vision-encoder-fp16.onnx)
+            onnx_path = onnx_dir / f"{name}-fp16.onnx"
+        if not onnx_path.exists():
+            logger.warning("Skipping %s — ONNX file not found.", name)
             continue
 
         logger.info("Converting %s to OpenVINO IR...", name)
