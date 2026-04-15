@@ -3,14 +3,10 @@
 
 """Bidirectional prompt generator."""
 
-import logging
-
 import torch
 from torch import nn
 
 from instantlearn.components.linear_sum_assignment import linear_sum_assignment
-
-log = logging.getLogger(__name__)
 
 __all__ = ["BidirectionalPromptGenerator"]
 
@@ -162,17 +158,6 @@ class BidirectionalPromptGenerator(nn.Module):
         keep_indices = keep_mask.nonzero().squeeze(-1)
         valid_indices = [combined_ref[keep_indices], combined_target[keep_indices]]
         valid_scores = combined_scores[keep_indices]
-
-        if log.isEnabledFor(logging.DEBUG):
-            log.debug(
-                "[MATCHING] ref_indices=%d, forward_matches=%d, bidir_matches=%d, "
-                "fallback_used=%s, final_points=%d",
-                ref_idx.numel(),
-                fw_scores.numel(),
-                num_bidir,
-                ~has_valid,
-                valid_scores.numel(),
-            )
 
         return valid_indices, valid_scores
 
@@ -459,16 +444,8 @@ class BidirectionalPromptGenerator(nn.Module):
         foreground_points = self._convert_to_image_coords(foreground_points, original_size)
         foreground_labels = foreground_points.new_ones((foreground_points.size(0), 1))
         foreground_points = torch.cat([foreground_points, foreground_labels], dim=1)
-        fg_before_filter = foreground_points.size(0)
         # Filter to keep only top-scoring foreground points
         foreground_points = self._filter_foreground_points(foreground_points)
-        if log.isEnabledFor(logging.DEBUG):
-            log.debug(
-                "[PROMPTS] fg_before_filter=%d, fg_after_filter=%d, bg_points=%d",
-                fg_before_filter,
-                foreground_points.size(0),
-                background_indices.numel(),
-            )
 
         # Process background points
         background_points = self._extract_point_coordinates([None, background_indices], background_scores)
