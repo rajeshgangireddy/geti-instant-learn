@@ -34,7 +34,7 @@ class BidirectionalPromptGenerator(nn.Module):
             When > 0, foreground points are first deduplicated per grid cell (keeping the
             best-scoring point per cell), then the top-scoring points are selected.
             This prevents point clustering on large objects. Set to 0 to disable
-            (original top-k-only behavior). Default: 0.
+            (original top-k-only behavior). Default: 8.
     """
 
     def __init__(
@@ -45,7 +45,7 @@ class BidirectionalPromptGenerator(nn.Module):
         num_foreground_points: int = 40,
         num_background_points: int = 2,
         similarity_threshold: float | None = None,
-        num_grid_cells: int = 0,
+        num_grid_cells: int = 8,
     ) -> None:
         """Initialize the BidirectionalPromptGenerator."""
         super().__init__()
