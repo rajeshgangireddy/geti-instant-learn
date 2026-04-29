@@ -197,7 +197,7 @@ class SAM3(Model):
         >>> ref_sample = Sample(
         ...     image=torch.zeros((3, 1024, 1024)),
         ...     bboxes=np.array([[100, 100, 200, 200]]),
-        ...     categories=["shoe"], # Optional, if not provided, then just the bounding box features are used. 
+        ...     categories=["shoe"], # Optional, if not provided, then just the bounding box features are used.
         ...     category_ids=np.array([0]),
         ... )
         >>> sam3_canvas.fit(ref_sample)
@@ -1578,7 +1578,7 @@ class SAM3(Model):
         """
         C = ref_image.shape[0]
         ref_h, ref_w = ref_image.shape[1], ref_image.shape[2]
-        tgt_h, tgt_w = tgt_image.shape[1], tgt_image.shape[2]
+        _tgt_h, tgt_w = tgt_image.shape[1], tgt_image.shape[2]
 
         canvas_w = max(ref_w, tgt_w)
         canvas_h = canvas_w
