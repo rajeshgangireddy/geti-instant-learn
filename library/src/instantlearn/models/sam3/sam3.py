@@ -9,6 +9,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from enum import Enum
 from itertools import zip_longest
+from typing import Literal
 
 import numpy as np
 import torch
@@ -68,7 +69,7 @@ class CanvasConfig:
     split_ratio: float = 0.3
     crop_padding: float = 2.0
     cache_text: bool = True
-    share_vision: bool | str = "auto"
+    share_vision: Literal["auto", "grouped", "spaced"] | bool = "auto"
 
     def __post_init__(self) -> None:
         if not 0 < self.split_ratio < 1:
@@ -186,6 +187,21 @@ class SAM3(Model):
         ... ]
         >>> sam3_cross.fit(refs)  # features concatenated across images
         >>> results = sam3_cross.predict(Sample(image=torch.zeros((3, 1024, 1024))))
+
+        >>> # Canvas mode — stitches ref + target into one image
+        >>> from instantlearn.models.sam3.sam3 import CanvasConfig
+        >>> sam3_canvas = SAM3(
+        ...     prompt_mode=Sam3PromptMode.CANVAS,
+        ...     canvas_config=CanvasConfig(split_ratio=0.3, crop_padding=2.0),
+        ... )
+        >>> ref_sample = Sample(
+        ...     image=torch.zeros((3, 1024, 1024)),
+        ...     bboxes=np.array([[100, 100, 200, 200]]),
+        ...     categories=["shoe"], # Optional, if not provided, then just the bounding box features are used. 
+        ...     category_ids=np.array([0]),
+        ... )
+        >>> sam3_canvas.fit(ref_sample)
+        >>> results = sam3_canvas.predict(Sample(image=torch.zeros((3, 1024, 1024))))
     """
 
     def __init__(
@@ -253,9 +269,6 @@ class SAM3(Model):
         self.exemplar_category_ids: list[int] | None = None
 
         # Canvas mode cached reference data (set during fit in CANVAS mode)
-        self._canvas_ref_images: list[torch.Tensor] | None = None
-        self._canvas_ref_bboxes: list[np.ndarray] | None = None
-        self._canvas_ref_text: str | None = None
         self._canvas_refs_by_category: dict[int, dict] | None = None
         self._canvas_text_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
 
@@ -416,46 +429,47 @@ class SAM3(Model):
         dummy_image = torch.randn(1, 3, self.resolution, self.resolution)
         dummy_boxes = torch.tensor([[[0.1, 0.2, 0.3, 0.4]]], dtype=torch.float32)
 
-        # Export to ONNX first (direct PyTorch → OpenVINO fails on many ops)
-        onnx_path = export_path / "sam3_canvas.onnx"
-        torch.onnx.export(
-            graph,
-            args=(dummy_image, dummy_boxes),
-            f=onnx_path,
-            input_names=["canvas_image", "input_boxes"],
-            output_names=["scores", "boxes", "masks"],
-            dynamic_axes={
-                "canvas_image": {2: "height", 3: "width"},
-                "input_boxes": {1: "num_boxes"},
-                "scores": {0: "num_detections"},
-                "boxes": {0: "num_detections"},
-                "masks": {0: "num_detections", 1: "mask_h", 2: "mask_w"},
-            },
-            opset_version=16,
-        )
-        logger.info("ONNX export saved to %s", onnx_path)
-
-        # Convert ONNX → OpenVINO IR
         try:
-            import openvino  # noqa: PLC0415
-        except ImportError as e:
-            msg = "OpenVINO is required for IR export. Install with: pip install openvino"
-            raise ImportError(msg) from e
+            # Export to ONNX first (direct PyTorch → OpenVINO fails on many ops)
+            onnx_path = export_path / "sam3_canvas.onnx"
+            torch.onnx.export(
+                graph,
+                args=(dummy_image, dummy_boxes),
+                f=onnx_path,
+                input_names=["canvas_image", "input_boxes"],
+                output_names=["scores", "boxes", "masks"],
+                dynamic_axes={
+                    "canvas_image": {2: "height", 3: "width"},
+                    "input_boxes": {1: "num_boxes"},
+                    "scores": {0: "num_detections"},
+                    "boxes": {0: "num_detections"},
+                    "masks": {0: "num_detections", 1: "mask_h", 2: "mask_w"},
+                },
+                opset_version=16,
+            )
+            logger.info("ONNX export saved to %s", onnx_path)
 
-        core = openvino.Core()
-        try:
-            ov_model = core.read_model(str(onnx_path))
-        except RuntimeError:
-            ov_model = openvino.convert_model(graph, example_input=(dummy_image, dummy_boxes))
+            # Convert ONNX → OpenVINO IR
+            try:
+                import openvino  # noqa: PLC0415
+            except ImportError as e:
+                msg = "OpenVINO is required for IR export. Install with: pip install openvino"
+                raise ImportError(msg) from e
 
-        xml_path = export_path / "sam3_canvas.xml"
-        openvino.save_model(ov_model, str(xml_path))
-        logger.info("OpenVINO IR saved to %s", xml_path)
+            core = openvino.Core()
+            try:
+                ov_model = core.read_model(str(onnx_path))
+            except RuntimeError:
+                ov_model = openvino.convert_model(graph, example_input=(dummy_image, dummy_boxes))
 
-        # Move model back to original device
-        self.model.to(self.device)
-        self.image_preprocessor.to(self.device)
-        self.sam3_postprocessor.to(self.device)
+            xml_path = export_path / "sam3_canvas.xml"
+            openvino.save_model(ov_model, str(xml_path))
+            logger.info("OpenVINO IR saved to %s", xml_path)
+        finally:
+            # Restore model to original device even if export fails
+            self.model.to(self.device)
+            self.image_preprocessor.to(self.device)
+            self.sam3_postprocessor.to(self.device)
 
         return str(xml_path)
 
@@ -899,16 +913,10 @@ class SAM3(Model):
             raise ValueError(msg)
 
         self._canvas_refs_by_category = refs_by_category
-        # Legacy single-category attrs for backward compatibility
-        all_images = [img for g in refs_by_category.values() for img in g["images"]]
-        all_bboxes = [bb for g in refs_by_category.values() for bb in g["bboxes"]]
-        self._canvas_ref_images = all_images
-        self._canvas_ref_bboxes = all_bboxes
-        self._canvas_ref_text = next(iter(refs_by_category.values()))["text"]
+        self._canvas_text_cache = {}  # Clear stale cache from previous fit()
         self.category_mapping = self._build_category_mapping(reference_batch)
 
         # Pre-cache text features (T4 optimization)
-        self._canvas_text_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
         for cat_refs in refs_by_category.values():
             text = cat_refs["text"]
             if text not in self._canvas_text_cache:
@@ -926,7 +934,8 @@ class SAM3(Model):
         logger.info(
             "Canvas mode: stored %d reference(s) across %d category(ies), "
             "ratio=%.2f, cached %d text embeddings",
-            len(all_images), len(refs_by_category),
+            sum(len(g["images"]) for g in refs_by_category.values()),
+            len(refs_by_category),
             self.canvas_config.split_ratio,
             len(self._canvas_text_cache),
         )
@@ -947,8 +956,11 @@ class SAM3(Model):
 
         Returns:
             List of prediction dicts per image.
+
+        Raises:
+            RuntimeError: If fit() has not been called.
         """
-        if self._canvas_ref_images is None:
+        if self._canvas_refs_by_category is None:
             msg = "Canvas mode requires fit() to be called first."
             raise RuntimeError(msg)
 
