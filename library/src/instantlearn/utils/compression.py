@@ -36,9 +36,9 @@ def compress_model(
             Smaller values preserve more accuracy at the cost of less compression.
 
     Returns:
-        Compressed OpenVINO model. For FP32 the model is returned unchanged.
-        For FP16 the caller should use ``openvino.save_model(..., compress_to_fp16=True)``
-        instead — this function returns the model unchanged in that case too.
+        Compressed OpenVINO model. For FP32 and FP16 the model is returned
+        unchanged (FP16 is handled by the caller via ``CompressionMode.FP16``
+        at save time).
 
     Raises:
         ValueError: If *mode* is not a valid :class:`CompressionMode` value.
@@ -46,7 +46,7 @@ def compress_model(
     mode = CompressionMode(mode)
 
     if mode in (CompressionMode.FP32, CompressionMode.FP16):
-        # FP32 = no-op. FP16 is handled natively by openvino.save_model(compress_to_fp16=True).
+        # FP32 = no-op. FP16 is handled at save time by openvino.save_model.
         return ov_model
 
     nncf_mode_name = _NNCF_MODE_MAP.get(mode)
