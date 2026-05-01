@@ -35,6 +35,7 @@ class ModelName(StrEnum):
 
     EFFICIENT_SAM3 = "EfficientSAM3"
     GROUNDED_SAM = "GroundedSAM"
+    INSID3 = "INSID3"
     MATCHER = "Matcher"
     PER_DINO = "PerDino"
     SOFT_MATCHER = "SoftMatcher"

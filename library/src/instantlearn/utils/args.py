@@ -138,6 +138,31 @@ def populate_benchmark_parser(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Use bidirectional soft matching",
     )
+    # INSID3-specific arguments
+    parser.add_argument(
+        "--insid3_image_size",
+        type=int,
+        default=518,
+        help="Input image resolution for INSID3 (default: 518, paper uses 1024)",
+    )
+    parser.add_argument(
+        "--svd_components",
+        type=int,
+        default=500,
+        help="Number of SVD components for INSID3 positional debiasing",
+    )
+    parser.add_argument(
+        "--tau",
+        type=float,
+        default=0.6,
+        help="INSID3 clustering sensitivity threshold",
+    )
+    parser.add_argument(
+        "--merge_threshold",
+        type=float,
+        default=0.2,
+        help="INSID3 cluster aggregation threshold",
+    )
     parser.add_argument(
         "--num_priors",
         type=int,

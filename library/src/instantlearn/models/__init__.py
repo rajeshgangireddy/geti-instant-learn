@@ -11,12 +11,14 @@ from .base import Model
 from .dinotxt import DinoTxtZeroShotClassification
 from .efficient_sam3 import EfficientSAM3
 from .grounded_sam import GroundedSAM
+from .insid3 import INSID3
 from .matcher import Matcher
 from .per_dino import PerDino
 from .sam3 import SAM3, Sam3PromptMode
 from .soft_matcher import SoftMatcher
 
 __all__ = [
+    "INSID3",
     "SAM3",
     "DinoTxtZeroShotClassification",
     "EfficientSAM3",

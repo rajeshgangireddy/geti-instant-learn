@@ -13,7 +13,7 @@ import torch
 
 from instantlearn.data.base import Batch
 from instantlearn.data.lvis import LVISAnnotationMode
-from instantlearn.models import SAM3, EfficientSAM3, GroundedSAM, Matcher, Model, PerDino, SoftMatcher
+from instantlearn.models import SAM3, EfficientSAM3, GroundedSAM, INSID3, Matcher, Model, PerDino, SoftMatcher
 from instantlearn.models.grounded_sam import GroundingModel
 from instantlearn.utils.constants import DatasetName, ModelName, SAMModelName
 
@@ -23,6 +23,7 @@ logger = getLogger("Geti Instant Learn")
 # SEMANTIC: merge instances into one mask per category (Matcher, SoftMatcher, etc.)
 # INSTANCE: keep per-instance masks + bounding boxes (SAM3)
 MODEL_ANNOTATION_MODES: dict[ModelName, LVISAnnotationMode] = {
+    ModelName.INSID3: LVISAnnotationMode.SEMANTIC,
     ModelName.MATCHER: LVISAnnotationMode.SEMANTIC,
     ModelName.SOFT_MATCHER: LVISAnnotationMode.SEMANTIC,
     ModelName.PER_DINO: LVISAnnotationMode.SEMANTIC,
@@ -190,6 +191,17 @@ def load_model(sam: SAMModelName, model_name: ModelName, args: Namespace) -> Mod
     logger.info(msg)
 
     match model_name:
+        case ModelName.INSID3:
+            return INSID3(
+                encoder_model=args.encoder_model,
+                image_size=getattr(args, "insid3_image_size", 518),
+                svd_components=getattr(args, "svd_components", 500),
+                tau=getattr(args, "tau", 0.6),
+                merge_threshold=getattr(args, "merge_threshold", 0.2),
+                precision=args.precision,
+                compile_models=args.compile_models,
+                device=args.device,
+            )
         case ModelName.PER_DINO:
             return PerDino(
                 sam=sam,
