@@ -6,8 +6,9 @@
 import logging
 import time
 
+import nncf
 import openvino as ov
-import nncf 
+
 from instantlearn.utils.constants import CompressionMode
 
 logger = logging.getLogger(__name__)
@@ -32,7 +33,7 @@ def compress_model(
         ov_model: OpenVINO model to compress.
         mode: Compression mode. One of the :class:`CompressionMode` values.
         group_size: Group size for INT4 compression. Ignored for INT8/FP16/FP32.
-            Lower group size usually improves accuracy at the sacrifice of inference speed. 
+            Lower group size usually improves accuracy at the sacrifice of inference speed.
 
     Returns:
         Compressed OpenVINO model. For FP32 and FP16 the model is returned
@@ -44,7 +45,7 @@ def compress_model(
     """
     mode = CompressionMode(mode)
 
-    if mode in (CompressionMode.FP32, CompressionMode.FP16):
+    if mode in {CompressionMode.FP32, CompressionMode.FP16}:
         # FP32 means no compression and FP16 is handled by openvino.save_model.
         return ov_model
 
@@ -53,21 +54,19 @@ def compress_model(
         msg = f"Unsupported compression mode: {mode}"
         raise ValueError(msg)
 
-
-
     nncf_mode = getattr(nncf.CompressWeightsMode, nncf_mode_name)
 
-    if mode in (CompressionMode.INT4_SYM, CompressionMode.INT4_ASYM):
+    if mode in {CompressionMode.INT4_SYM, CompressionMode.INT4_ASYM}:
         logger.warning(
             "INT4 weight compression on small vision models may degrade accuracy. "
-            "Benchmark the quantized model before deploying."
+            "Benchmark the quantized model before deploying.",
         )
 
     logger.info("Compressing model weights to %s ...", mode.value)
     start = time.time()
 
     kwargs: dict = {"mode": nncf_mode}
-    if mode in (CompressionMode.INT4_SYM, CompressionMode.INT4_ASYM):
+    if mode in {CompressionMode.INT4_SYM, CompressionMode.INT4_ASYM}:
         kwargs["group_size"] = group_size
 
     ov_model = nncf.compress_weights(ov_model, **kwargs)

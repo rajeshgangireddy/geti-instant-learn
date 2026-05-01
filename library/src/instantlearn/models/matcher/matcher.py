@@ -448,6 +448,7 @@ class Matcher(Model):
         Raises:
             ImportError: If OpenVINO is selected but not installed.
             RuntimeError: If fit() has not been called before predict().
+            ValueError: If INT4 compression is requested for OpenVINO export.
         """
         if self.ref_features is None:
             msg = "No reference features. Call fit() first."
@@ -458,10 +459,10 @@ class Matcher(Model):
         fallback_segmenter = None
         if Backend(backend) == Backend.OPENVINO and self.sam_predictor.sam_model_name == SAMModelName.SAM_HQ_TINY:
             logger.warning(
-                "SAM-HQ-Tiny is not supported for OpenVINO export. " \
+                "SAM-HQ-Tiny is not supported for OpenVINO export. "
                 "Some of the layers are non-deterministic and so the exported model is not reliable for inference. "
                 "Falling back to SAM-HQ-base for the exported model. "
-                "SAM-HQ-base weights will be downloaded if not already cached."
+                "SAM-HQ-base weights will be downloaded if not already cached.",
             )
             fallback_predictor = load_sam_model(
                 SAMModelName.SAM_HQ_BASE,
@@ -484,11 +485,15 @@ class Matcher(Model):
         if backend != Backend.OPENVINO and isinstance(first_encoder_param, torch.Tensor):
             export_device = first_encoder_param.device
 
-        
-        #INT4 compression does not work well on Matcher. Add an error if compression is INT4
-        if CompressionMode(compression) in (CompressionMode.INT4_SYM, CompressionMode.INT4_ASYM):
-            msg = f"INT4 compressed models for Matcher produce random noisy masks and are not accurate. " \
-                  f"Please use INT8 compression or no compression for Matcher exports."
+        # INT4 compression does not work well on Matcher — reject early.
+        if Backend(backend) == Backend.OPENVINO and CompressionMode(compression) in {
+            CompressionMode.INT4_SYM,
+            CompressionMode.INT4_ASYM,
+        }:
+            msg = (
+                "INT4 compressed models for Matcher produce random noisy masks and are not accurate. "
+                "Please use INT8 compression or no compression for Matcher exports."
+            )
             raise ValueError(msg)
 
         self.sam_predictor.sync_device(export_device, dtype=torch.float32)
@@ -592,7 +597,7 @@ class Matcher(Model):
 
                 # Apply weight compression if requested (INT8/INT4 via NNCF).
                 compression_mode = CompressionMode(compression)
-                if compression_mode not in (CompressionMode.FP32, CompressionMode.FP16):
+                if compression_mode not in {CompressionMode.FP32, CompressionMode.FP16}:
                     from instantlearn.utils.compression import compress_model  # noqa: PLC0415
 
                     ov_model = compress_model(ov_model, mode=compression_mode)

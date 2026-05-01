@@ -25,21 +25,25 @@ from instantlearn.utils.constants import Backend, CompressionMode, SAMModelName
 
 @pytest.fixture
 def fss1000_root() -> Path:
+    """Path to FSS-1000 test assets."""
     return Path(__file__).parent.parent.parent.parent / "examples" / "assets" / "fss-1000"
 
 
 @pytest.fixture
 def target_image_path(fss1000_root: Path) -> Path:
+    """Path to a target image for inference."""
     return fss1000_root / "images" / "apple" / "2.jpg"
 
 
 @pytest.fixture
 def dataset(fss1000_root: Path) -> FolderDataset:
+    """FolderDataset loaded from FSS-1000 apple category."""
     return FolderDataset(root=fss1000_root, categories=["apple"], n_shots=1)
 
 
 @pytest.fixture
 def reference_batch(dataset: FolderDataset) -> Batch:
+    """Single-sample reference batch for fitting."""
     ref_dataset = dataset.get_reference_dataset()
     return Batch.collate([ref_dataset[0]])
 
@@ -118,45 +122,22 @@ class TestMatcherQuantizedExport:
         "compression",
         [CompressionMode.INT4_SYM, CompressionMode.INT4_ASYM],
     )
-    def test_int4_export_and_inference(
+    def test_int4_export_raises_error(
         self,
         fitted_matcher: Matcher,
         target_image_path: Path,
         tmp_path: Path,
         compression: CompressionMode,
     ) -> None:
-        """INT4 compression may degrade accuracy but should still produce valid outputs."""
-        import openvino  # noqa: PLC0415
+        """INT4 compression is not supported for OpenVINO exports."""
+        del target_image_path
 
-        exported_path = fitted_matcher.export(
-            export_dir=tmp_path,
-            backend=Backend.OPENVINO,
-            compression=compression,
-        )
-
-        assert exported_path.exists()
-
-        core = openvino.Core()
-        ov_model = core.read_model(str(exported_path))
-        compiled = core.compile_model(ov_model, "CPU")
-
-        expected_shape = compiled.input(0).shape
-        target_image = read_image(target_image_path)
-        input_data = target_image.numpy()[None, ...].astype(np.float32)
-        if input_data.shape != tuple(expected_shape):
-            import torch  # noqa: PLC0415
-            import torch.nn.functional as F  # noqa: N812, PLC0415
-
-            tensor = torch.from_numpy(input_data)
-            tensor = F.interpolate(tensor, size=(expected_shape[2], expected_shape[3]), mode="bilinear")
-            input_data = tensor.numpy()
-
-        outputs = compiled(input_data)
-        masks, scores, labels = outputs.values()
-
-        assert masks.ndim == 3
-        assert scores.ndim == 1
-        assert labels.ndim == 1
+        with pytest.raises(ValueError, match="INT4 compressed models"):
+            fitted_matcher.export(
+                export_dir=tmp_path,
+                backend=Backend.OPENVINO,
+                compression=compression,
+            )
 
     def test_compression_reduces_model_size(
         self,

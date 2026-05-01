@@ -129,6 +129,7 @@ class TestMatcherExport:
             result = model.export(
                 export_dir=tmp_path,
                 backend=Backend.OPENVINO,
+                compression="fp32",
             )
 
         assert result == tmp_path / "matcher.xml"
@@ -192,6 +193,7 @@ class TestMatcherExport:
             model.export(
                 export_dir=tmp_path,
                 backend=Backend.OPENVINO,
+                compression="fp32",
             )
 
         mock_convert.assert_called_once()
