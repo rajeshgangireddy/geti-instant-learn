@@ -431,7 +431,7 @@ class Matcher(Model):
         self,
         export_dir: str | Path = Path("./exports/matcher"),
         backend: str | Backend = Backend.ONNX,
-        compression: str | CompressionMode = CompressionMode.FP32,
+        compression: str | CompressionMode = CompressionMode.INT8_SYM,
     ) -> Path:
         """Export model components.
 
@@ -440,7 +440,7 @@ class Matcher(Model):
             backend: Export backend (ONNX, OpenVINO).
             compression: Weight compression mode for the exported OpenVINO model.
                 See :class:`~instantlearn.utils.constants.CompressionMode` for options.
-                Only applied when *backend* is ``OPENVINO``. Default: FP32 (no compression).
+                Only applied when *backend* is ``OPENVINO``. Default: INT8_SYM.
 
         Returns:
             Path to export directory.
@@ -483,6 +483,13 @@ class Matcher(Model):
         first_encoder_param = next(iter(self.encoder._model.model.parameters()), None)  # noqa: SLF001
         if backend != Backend.OPENVINO and isinstance(first_encoder_param, torch.Tensor):
             export_device = first_encoder_param.device
+
+        
+        #INT4 compression does not work well on Matcher. Add an error if compression is INT4
+        if CompressionMode(compression) in (CompressionMode.INT4_SYM, CompressionMode.INT4_ASYM):
+            msg = f"INT4 compressed models for Matcher produce random noisy masks and are not accurate. " \
+                  f"Please use INT8 compression or no compression for Matcher exports."
+            raise ValueError(msg)
 
         self.sam_predictor.sync_device(export_device, dtype=torch.float32)
         self.segmenter.device = self.sam_predictor.device

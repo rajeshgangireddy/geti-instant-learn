@@ -7,13 +7,12 @@ import logging
 import time
 
 import openvino as ov
-
+import nncf 
 from instantlearn.utils.constants import CompressionMode
 
 logger = logging.getLogger(__name__)
 
 # Mapping from CompressionMode to nncf.CompressWeightsMode.
-# Resolved lazily so that nncf is only imported when actually used.
 _NNCF_MODE_MAP: dict[CompressionMode, str] = {
     CompressionMode.INT8_SYM: "INT8_SYM",
     CompressionMode.INT8_ASYM: "INT8_ASYM",
@@ -24,7 +23,7 @@ _NNCF_MODE_MAP: dict[CompressionMode, str] = {
 
 def compress_model(
     ov_model: ov.Model,
-    mode: str | CompressionMode = CompressionMode.FP32,
+    mode: str | CompressionMode = CompressionMode.INT8_SYM,
     group_size: int = 128,
 ) -> ov.Model:
     """Apply weight compression to an OpenVINO model.
@@ -33,7 +32,7 @@ def compress_model(
         ov_model: OpenVINO model to compress.
         mode: Compression mode. One of the :class:`CompressionMode` values.
         group_size: Group size for INT4 compression. Ignored for INT8/FP16/FP32.
-            Smaller values preserve more accuracy at the cost of less compression.
+            Lower group size usually improves accuracy at the sacrifice of inference speed. 
 
     Returns:
         Compressed OpenVINO model. For FP32 and FP16 the model is returned
@@ -46,7 +45,7 @@ def compress_model(
     mode = CompressionMode(mode)
 
     if mode in (CompressionMode.FP32, CompressionMode.FP16):
-        # FP32 = no-op. FP16 is handled at save time by openvino.save_model.
+        # FP32 means no compression and FP16 is handled by openvino.save_model.
         return ov_model
 
     nncf_mode_name = _NNCF_MODE_MAP.get(mode)
@@ -54,7 +53,7 @@ def compress_model(
         msg = f"Unsupported compression mode: {mode}"
         raise ValueError(msg)
 
-    import nncf  # noqa: PLC0415
+
 
     nncf_mode = getattr(nncf.CompressWeightsMode, nncf_mode_name)
 
