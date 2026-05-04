@@ -252,6 +252,15 @@ notice-rgx = '# Copyright \(C\) (\d{4}(-\d{4})?) Intel Corporation\r?\n# SPDX-Li
 "examples/**/*.py" = [
     "INP001",   # Examples are standalone, not packages
 ]
+"tools/**/*.py" = [
+    "T201",     # print() is intentional for CLI output
+    "PLR0915",  # Too many statements — expected in benchmark scripts
+    "G004",     # Logging f-strings acceptable in standalone dev tools
+]
+"examples/**/*.ipynb" = [
+    "T201",     # print() is the standard output mechanism in notebooks
+    "N812",     # Allow conventional aliases like `import torch.nn.functional as F`
+]
 
 
 # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # # #
