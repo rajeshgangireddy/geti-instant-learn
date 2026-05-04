@@ -431,7 +431,7 @@ class Matcher(Model):
         self,
         export_dir: str | Path = Path("./exports/matcher"),
         backend: str | Backend = Backend.ONNX,
-        compression: str | CompressionMode = CompressionMode.INT8_SYM,
+        compression: CompressionMode = CompressionMode.INT8_SYM,
     ) -> Path:
         """Export model components.
 
@@ -485,9 +485,9 @@ class Matcher(Model):
         if backend != Backend.OPENVINO and isinstance(first_encoder_param, torch.Tensor):
             export_device = first_encoder_param.device
 
-        # INT4 compression does not work well on Matcher. 
-        # Export will succeed but masks produces are just noise  
-        if Backend(backend) == Backend.OPENVINO and CompressionMode(compression) in {
+        # INT4 compression does not work well on Matcher.
+        # Export will succeed but masks produces are just noise
+        if Backend(backend) == Backend.OPENVINO and compression in {
             CompressionMode.INT4_SYM,
             CompressionMode.INT4_ASYM,
         }:
@@ -597,16 +597,15 @@ class Matcher(Model):
                 ov_model.reshape({input_name: [1, 3, input_size, input_size]})
 
                 # Apply weight compression if requested (INT8/INT4 via NNCF).
-                compression_mode = CompressionMode(compression)
-                if compression_mode not in {CompressionMode.FP32, CompressionMode.FP16}:
+                if compression not in {CompressionMode.FP32, CompressionMode.FP16}:
                     from instantlearn.utils.compression import compress_model  # noqa: PLC0415
 
-                    ov_model = compress_model(ov_model, mode=compression_mode)
+                    ov_model = compress_model(ov_model, mode=compression)
 
                 openvino.save_model(
                     ov_model,
                     export_path / "matcher.xml",
-                    compress_to_fp16=compression_mode == CompressionMode.FP16,
+                    compress_to_fp16=compression == CompressionMode.FP16,
                 )
                 return export_path / "matcher.xml"
             except ImportError as e:

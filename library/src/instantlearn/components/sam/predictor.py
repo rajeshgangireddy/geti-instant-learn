@@ -27,7 +27,7 @@ logger = getLogger("Geti Instant Learn")
 
 
 def load_sam_model(
-    sam: SAMModelName | str,
+    sam: SAMModelName,
     device: str = "cuda",
     precision: str = "bf16",
     compile_models: bool = False,
@@ -67,9 +67,6 @@ def load_sam_model(
         ...     device="cuda",
         ... )
     """
-    if isinstance(sam, str) and not isinstance(sam, SAMModelName):
-        sam = SAMModelName(sam)
-
     if sam not in MODEL_MAP:
         msg = f"Invalid model type: {sam}"
         raise ValueError(msg)
@@ -91,20 +88,16 @@ def load_sam_model(
     return predictor
 
 
-def check_model_weights(model_name: SAMModelName | str) -> None:
+def check_model_weights(model_name: SAMModelName) -> None:
     """Check if model weights exist locally, download if necessary.
 
     Args:
-        model_name: The name of the model (enum or string).
+        model_name: The SAM model name enum.
 
     Raises:
         ValueError: If the model is not found in MODEL_MAP.
         ValueError: If the model weights are missing.
     """
-    # Coerce string to enum for consistent .value access
-    if isinstance(model_name, str) and not isinstance(model_name, SAMModelName):
-        model_name = SAMModelName(model_name)
-
     if model_name not in MODEL_MAP:
         msg = f"Model '{model_name.value}' not found in MODEL_MAP for weight checking."
         raise ValueError(msg)

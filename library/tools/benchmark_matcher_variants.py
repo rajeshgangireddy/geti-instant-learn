@@ -25,7 +25,7 @@ import torch.nn.functional as F  # noqa: N812
 
 from instantlearn.data import Sample
 from instantlearn.models import Matcher
-from instantlearn.utils.constants import CompressionMode, SAMModelName
+from instantlearn.utils.constants import Backend, CompressionMode, SAMModelName
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -115,7 +115,7 @@ def benchmark_variant(
         tic = time()
         ov_path = model.export(
             export_dir=export_dir,
-            backend="openvino",
+            backend=Backend.OPENVINO,
             compression=compression,
         )
         result["export_time"] = time() - tic

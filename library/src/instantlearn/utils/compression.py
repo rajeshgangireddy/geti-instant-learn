@@ -24,7 +24,7 @@ _NNCF_MODE_MAP: dict[CompressionMode, str] = {
 
 def compress_model(
     ov_model: ov.Model,
-    mode: str | CompressionMode = CompressionMode.INT8_SYM,
+    mode: CompressionMode = CompressionMode.INT8_SYM,
     group_size: int = 128,
 ) -> ov.Model:
     """Apply weight compression to an OpenVINO model.
@@ -41,10 +41,8 @@ def compress_model(
         at save time).
 
     Raises:
-        ValueError: If *mode* is not a valid :class:`CompressionMode` value.
+        ValueError: If *mode* is not a supported compression mode.
     """
-    mode = CompressionMode(mode)
-
     if mode in {CompressionMode.FP32, CompressionMode.FP16}:
         # FP32 means no compression and FP16 is handled by openvino.save_model.
         return ov_model
