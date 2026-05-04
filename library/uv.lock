@@ -950,11 +950,11 @@ name = "instantlearn"
 source = { editable = "." }
 dependencies = [
     { name = "ftfy" },
-    { name = "huggingface-hub" },
     { name = "jsonargparse" },
     { name = "lvis" },
     { name = "markupsafe" },
     { name = "matplotlib" },
+    { name = "nncf" },
     { name = "numpy" },
     { name = "onnx" },
     { name = "onnxruntime" },
@@ -1007,10 +1007,8 @@ docs = [
 ]
 full = [
     { name = "build" },
-    { name = "gradio" },
     { name = "ipykernel" },
     { name = "jupyter" },
-    { name = "nncf" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "pytest-assume" },
@@ -1020,9 +1018,6 @@ full = [
 notebook = [
     { name = "ipykernel" },
     { name = "jupyter" },
-]
-quantize = [
-    { name = "nncf" },
 ]
 xpu = [
     { name = "torch", version = "2.10.0+xpu", source = { registry = "https://download.pytorch.org/whl/xpu" } },
@@ -1046,8 +1041,7 @@ requires-dist = [
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.2.2.post1" },
     { name = "ftfy" },
     { name = "gradio", marker = "extra == 'demo'", specifier = ">=4.0" },
-    { name = "huggingface-hub", specifier = ">=0.25.0" },
-    { name = "instantlearn", extras = ["demo", "dev", "notebook", "quantize"], marker = "extra == 'full'" },
+    { name = "instantlearn", extras = ["dev", "notebook"], marker = "extra == 'full'" },
     { name = "ipykernel", marker = "extra == 'notebook'", specifier = "==6.30.1" },
     { name = "jsonargparse" },
     { name = "jupyter", marker = "extra == 'notebook'", specifier = "==1.1.1" },
@@ -1055,7 +1049,7 @@ requires-dist = [
     { name = "markupsafe", specifier = "==3.0.2" },
     { name = "matplotlib", specifier = "==3.10.8" },
     { name = "myst-parser", marker = "extra == 'docs'", specifier = ">=2.0.0" },
-    { name = "nncf", marker = "extra == 'quantize'", specifier = ">=2.14.0" },
+    { name = "nncf", specifier = ">=2.16.0" },
     { name = "numpy", specifier = "~=2.2.6" },
     { name = "onnx", specifier = ">=1.19.1" },
     { name = "onnxruntime", specifier = ">=1.23.2" },
@@ -1094,7 +1088,7 @@ requires-dist = [
     { name = "triton-xpu", marker = "extra == 'xpu'", specifier = "==3.6.0", index = "https://download.pytorch.org/whl/xpu", conflict = { package = "instantlearn", extra = "xpu" } },
     { name = "twine", marker = "extra == 'dev'", specifier = ">=6.1.0" },
 ]
-provides-extras = ["cpu", "cuda", "xpu", "notebook", "quantize", "demo", "dev", "docs", "full"]
+provides-extras = ["cpu", "cuda", "xpu", "notebook", "demo", "dev", "docs", "full"]
 
 [package.metadata.requires-dev]
 dev = [
