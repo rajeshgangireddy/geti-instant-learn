@@ -7,6 +7,8 @@ Applies NNCF weight compression (INT8 or INT4) to existing FP16 OpenVINO IR
 models.  Produces proper OpenVINO IR with compressed weights.  No calibration
 data is needed.
 
+Supported methods: ``nncf-int8``, ``nncf-int4``, and ``all``.
+
 Usage:
     # Apply NNCF INT8 weight compression to FP16 IR
     python quantize_sam3_openvino.py --method nncf-int8 --source-dir ./sam3-openvino/openvino-fp16

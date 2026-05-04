@@ -738,13 +738,19 @@ class SAM3OpenVINO(Model):
             else:
                 texts = sample.categories or []
                 category_ids = list(sample.category_ids or [])
-                num_visual = max(len(bboxes), len(points))
-                if num_visual:
-                    if len(texts) != num_visual:
-                        texts = ["visual"] * num_visual
-                    if len(category_ids) != num_visual:
-                        default_category_id = category_ids[0] if category_ids else 0
-                        category_ids = [default_category_id] * num_visual
+
+            # Keep prompt text and category ids aligned with the effective number of prompts.
+            num_prompts = max(len(texts), len(bboxes), len(points))
+            if num_prompts:
+                if len(texts) == 0:
+                    texts = ["visual"] * num_prompts
+                elif len(texts) != num_prompts:
+                    texts = [texts[0]] * num_prompts
+
+                if len(category_ids) == 0:
+                    category_ids = [0] * num_prompts
+                elif len(category_ids) != num_prompts:
+                    category_ids = [category_ids[0]] * num_prompts
 
             all_masks: list[torch.Tensor] = []
             all_boxes: list[torch.Tensor] = []
