@@ -101,7 +101,9 @@ class Sam3CanvasInferenceGraph(nn.Module):
 
         # Postprocess — the Sam3Postprocessor already has
         # torch.onnx.is_in_onnx_export() guards for export-safe output format.
-        target_sizes = [pixel_values.shape[-2:]]
+        # Use the original canvas size so exported boxes and masks stay in the
+        # input canvas coordinate system instead of the resized model space.
+        target_sizes = original_sizes
         results = self.postprocessor(outputs, target_sizes=target_sizes)
 
         # During ONNX export, postprocessor returns tuples (scores, boxes, masks)

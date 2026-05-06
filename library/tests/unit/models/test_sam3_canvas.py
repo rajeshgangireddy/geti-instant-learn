@@ -153,8 +153,8 @@ class TestExtractTargetPredictions:
         tgt_region = (50, 100, 200, 300)
 
         result = SAM3._extract_target_predictions(pred, tgt_region, 300, 200)
-        # At minimum the outside box should be excluded
-        assert result["pred_boxes"].shape[0] <= 2
+        # The outside box should be filtered, leaving exactly the inside box
+        assert result["pred_boxes"].shape[0] == 1
 
 
 class TestMergeCrossCategory:

@@ -78,6 +78,16 @@ class CanvasConfig:
         if self.crop_padding <= 0:
             msg = f"crop_padding must be positive, got {self.crop_padding}"
             raise ValueError(msg)
+        if not isinstance(self.share_vision, bool) and self.share_vision not in {
+            "auto",
+            "grouped",
+            "spaced",
+        }:
+            msg = (
+                "share_vision must be a bool or one of "
+                f"{{\"auto\", \"grouped\", \"spaced\"}}, got {self.share_vision!r}"
+            )
+            raise ValueError(msg)
 
 
 class Sam3PromptMode(str, Enum):
@@ -453,7 +463,7 @@ class SAM3(Model):
             try:
                 import openvino  # noqa: PLC0415
             except ImportError as e:
-                msg = "OpenVINO is required for IR export. Install with: pip install openvino"
+                msg = "OpenVINO is required for IR export. Install with: uv pip install openvino"
                 raise ImportError(msg) from e
 
             core = openvino.Core()
@@ -1010,7 +1020,7 @@ class SAM3(Model):
             cat_images, tgt_image, cat_bboxes,
         )
 
-        pred = self._run_canvas_forward(canvas, canvas_bboxes, cat_text, (tgt_h, tgt_w))
+        pred = self._run_canvas_forward(canvas, canvas_bboxes, cat_text)
         remapped = self._extract_target_predictions(pred, tgt_region, tgt_h, tgt_w)
 
         boxes = remapped.get("pred_boxes", torch.empty(0, 5))
@@ -1129,9 +1139,10 @@ class SAM3(Model):
         for cat_refs in self._canvas_refs_by_category.values():
             for img in cat_refs["images"]:
                 canvas_w = max(canvas_w, img.shape[2])
-        canvas_h = canvas_w
+        canvas_h = max(canvas_w, 2)
 
         ref_strip_h = int(canvas_h * self.canvas_config.split_ratio)
+        ref_strip_h = min(max(ref_strip_h, 1), canvas_h - 1)
         tgt_canvas_h = canvas_h - ref_strip_h
 
         tgt_resized = F.interpolate(
@@ -1148,6 +1159,13 @@ class SAM3(Model):
         if spacing == "grouped":
             # [cat1_refs] [gap] [cat2_refs] ... — 2K-1 slots
             n_slots = 2 * n_cats - 1
+            if n_slots > canvas_w:
+                msg = (
+                    "Grouped canvas layout requires at least one pixel per slot. "
+                    f"Got canvas width {canvas_w} for {n_slots} slots across {n_cats} "
+                    "categories. Reduce the number of categories or increase canvas width."
+                )
+                raise ValueError(msg)
             slot_w = canvas_w // n_slots
 
             for cat_idx, (cat_id, cat_refs) in enumerate(cat_items):
@@ -1258,7 +1276,7 @@ class SAM3(Model):
                 cat_refs["images"], tgt_image, cat_refs["bboxes"],
             )
             pred = self._run_canvas_forward(
-                canvas, canvas_bboxes, cat_refs["text"], (tgt_h, tgt_w),
+                canvas, canvas_bboxes, cat_refs["text"],
             )
             remapped = self._extract_target_predictions(
                 pred, tgt_region, tgt_h, tgt_w,
@@ -1389,7 +1407,6 @@ class SAM3(Model):
         canvas: torch.Tensor,
         canvas_bboxes: list[np.ndarray],
         text: str,
-        target_size: tuple[int, int],
         vision_embeds: dict[str, torch.Tensor] | None = None,
     ) -> dict[str, torch.Tensor]:
         """Run model forward on canvas with cached text features.
@@ -1402,7 +1419,6 @@ class SAM3(Model):
             canvas: Canvas image tensor (C, H, W).
             canvas_bboxes: Bounding boxes on the canvas.
             text: Text prompt for this category.
-            target_size: (height, width) of original target image.
             vision_embeds: Pre-computed vision embeddings to reuse. If None,
                 computes them from the canvas.
 
@@ -1581,9 +1597,10 @@ class SAM3(Model):
         _tgt_h, tgt_w = tgt_image.shape[1], tgt_image.shape[2]
 
         canvas_w = max(ref_w, tgt_w)
-        canvas_h = canvas_w
+        canvas_h = max(canvas_w, 2)
 
         ref_canvas_h = int(canvas_h * self.canvas_config.split_ratio)
+        ref_canvas_h = min(max(ref_canvas_h, 1), canvas_h - 1)
         tgt_canvas_h = canvas_h - ref_canvas_h
 
         ref_resized = F.interpolate(
@@ -1628,9 +1645,10 @@ class SAM3(Model):
 
         C = tgt_image.shape[0]
         canvas_w = max(tgt_image.shape[2], max(c.shape[2] for c in crops))
-        canvas_h = canvas_w
+        canvas_h = max(canvas_w, 2)
 
         ref_strip_h = int(canvas_h * self.canvas_config.split_ratio)
+        ref_strip_h = min(max(ref_strip_h, 1), canvas_h - 1)
         tgt_canvas_h = canvas_h - ref_strip_h
 
         tgt_resized = F.interpolate(
@@ -1639,6 +1657,13 @@ class SAM3(Model):
         ).squeeze(0)
 
         n_refs = len(crops)
+        if n_refs > canvas_w:
+            msg = (
+                "Canvas layout requires at least one pixel per reference crop. "
+                f"Got canvas width {canvas_w} for {n_refs} reference crops. "
+                "Reduce the number of references or increase canvas width."
+            )
+            raise ValueError(msg)
         crop_w = canvas_w // n_refs
         remainder = canvas_w - crop_w * n_refs
 
