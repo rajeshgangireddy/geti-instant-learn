@@ -63,16 +63,44 @@ _DEFAULT_HF_REPO = "rajeshgangireddy/SAM3_OpenVINO"
 class SAM3OVVariant(str, Enum):
     """Available SAM3 OpenVINO model variants.
 
-    Each variant maps to a subdirectory name on HuggingFace Hub.
-    Quantised variants align with :class:`~instantlearn.utils.constants.CompressionMode`.
+    Each variant maps to a subdirectory name on HuggingFace Hub
+    (``rajeshgangireddy/SAM3_OpenVINO``).
+
+    Recommended variants:
+
+    * **FP16** — Best GPU performance (Arc/Xe). Default for GPU inference.
+    * **INT8_SYM** — W8A16 weight-only compression via ``compress_weights(INT8_SYM)``.
+      ~50% smaller than FP16, 1.6x CPU speedup, no accuracy loss.
+    * **INT8_PTQ** — W8A8 post-training quantization via ``nncf.quantize()``.
+      Quantizes both weights and activations. 2.1x CPU speedup (VNNI),
+      no accuracy loss. Best CPU variant. Slower on GPU (0.7x) due to
+      INT8 Q/DQ dispatch overhead on FP16 DPAS units.
+    * **ONNX** — Original ONNX exports. Can be loaded directly by OpenVINO
+      runtime (auto-converted to IR at load time).
+
+    Other variants (available on HuggingFace but no significant advantage
+    over the recommended set):
+
+    * **FP32** — No accuracy or speed benefit over FP16 on GPU.
+    * **INT8_ASYM** — Similar to INT8_SYM, no measurable difference.
+    * **INT4_SYM / INT4_ASYM** — Smaller models but accuracy degradation
+      on text-mode prompting.
+    * **INT8_W8A16** — Identical to INT8_SYM (same ``compress_weights``
+      with ``INT8_SYM`` mode), kept for backward compatibility.
     """
 
+    # -- Recommended variants --
     FP16 = "openvino-fp16"
-    FP32 = "openvino-fp32"
     INT8_SYM = "openvino-int8_sym"
+    INT8_PTQ = "openvino-int8_ptq_gpu"
+    ONNX = "onnx"
+
+    # -- Other variants (no significant advantage over recommended set) --
+    FP32 = "openvino-fp32"
     INT8_ASYM = "openvino-int8_asym"
     INT4_SYM = "openvino-int4_sym"
     INT4_ASYM = "openvino-int4_asym"
+    INT8_W8A16 = "openvino-int8_w8a16"
 
 
 # Sub-model file names
@@ -262,32 +290,36 @@ class SAM3OpenVINO(Model):
 
         core = ov.Core()
 
+        # Compile properties: optimise for single-request latency (default GPU
+        # hint is THROUGHPUT which adds overhead for real-time single-image use).
+        _compile_props = {"PERFORMANCE_HINT": "LATENCY"} if self.ov_device != "CPU" else {}
+
         # Vision encoder + text encoder (always required)
         vision_path = _require_model_file(self.model_dir, _VISION_ENCODER)
         text_path = _require_model_file(self.model_dir, _TEXT_ENCODER)
 
         logger.info("Loading SAM3 OpenVINO models from %s on %s...", self.model_dir, self.ov_device)
-        self.vision_model = core.compile_model(vision_path, self.ov_device)
-        self.text_model = core.compile_model(text_path, self.ov_device)
+        self.vision_model = core.compile_model(vision_path, self.ov_device, _compile_props)
+        self.text_model = core.compile_model(text_path, self.ov_device, _compile_props)
         logger.info("  Vision encoder: %s", vision_path.name)
         logger.info("  Text encoder: %s", text_path.name)
 
         # Load prompt decoder (required)
         prompt_decoder_path = _require_model_file(self.model_dir, _PROMPT_DECODER)
-        self.decoder_model = core.compile_model(prompt_decoder_path, self.ov_device)
+        self.decoder_model = core.compile_model(prompt_decoder_path, self.ov_device, _compile_props)
         logger.info("  Prompt decoder: %s", prompt_decoder_path.name)
 
         # Load geometry encoders (optional — needed for box/point/exemplar)
         geo_path = _find_model_file(self.model_dir, _GEOMETRY_ENCODER)
         if geo_path is not None:
-            self.geometry_model = core.compile_model(geo_path, self.ov_device)
+            self.geometry_model = core.compile_model(geo_path, self.ov_device, _compile_props)
             logger.info("  Geometry encoder (classic): %s", geo_path.name)
         else:
             self.geometry_model = None
 
         geo_ex_path = _find_model_file(self.model_dir, _GEOMETRY_ENCODER_EXEMPLAR)
         if geo_ex_path is not None:
-            self.geometry_exemplar_model = core.compile_model(geo_ex_path, self.ov_device)
+            self.geometry_exemplar_model = core.compile_model(geo_ex_path, self.ov_device, _compile_props)
             logger.info("  Geometry encoder (exemplar): %s", geo_ex_path.name)
         else:
             self.geometry_exemplar_model = None

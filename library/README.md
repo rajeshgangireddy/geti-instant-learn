@@ -125,14 +125,16 @@ predictions = model.predict([
 `SAM3OpenVINO` runs SAM3 on OpenVINO IR models for faster CPU/GPU inference without PyTorch at runtime.
 Pre-exported models are auto-downloaded from [HuggingFace](https://huggingface.co/rajeshgangireddy/SAM3_OpenVINO).
 
-| Variant | Enum | Precision | Recommended Use |
-| ------- | ---- | --------- | --------------- |
-| FP16 | `SAM3OVVariant.FP16` | Half-precision float | Baseline — balanced speed and accuracy |
-| FP32 | `SAM3OVVariant.FP32` | Full-precision float | Maximum accuracy, debugging |
-| INT8 Symmetric | `SAM3OVVariant.INT8_SYM` | 8-bit symmetric | Faster inference, good accuracy |
-| INT8 Asymmetric | `SAM3OVVariant.INT8_ASYM` | 8-bit asymmetric | Slightly better accuracy than SYM |
-| INT4 Symmetric | `SAM3OVVariant.INT4_SYM` | 4-bit symmetric | Maximum compression, fastest |
-| INT4 Asymmetric | `SAM3OVVariant.INT4_ASYM` | 4-bit asymmetric | Better accuracy than INT4 SYM |
+| Variant | Enum | Method | Recommended Use |
+| ------- | ---- | ------ | --------------- |
+| **FP16** | `SAM3OVVariant.FP16` | Baseline | Best GPU performance (Arc/Xe) |
+| **INT8 SYM** | `SAM3OVVariant.INT8_SYM` | W8A16 weight-only | 1.6x CPU speedup, ~50% smaller, no accuracy loss |
+| **INT8 PTQ** | `SAM3OVVariant.INT8_PTQ` | W8A8 `nncf.quantize` | 2.1x CPU speedup (VNNI), best CPU variant |
+| ONNX | `SAM3OVVariant.ONNX` | Original exports | Cross-framework compatibility |
+| FP32 | `SAM3OVVariant.FP32` | Baseline | Debugging (no benefit over FP16) |
+| INT8 ASYM | `SAM3OVVariant.INT8_ASYM` | W8A16 weight-only | Similar to INT8 SYM |
+| INT4 SYM | `SAM3OVVariant.INT4_SYM` | W4A16 weight-only | Maximum compression, some accuracy loss |
+| INT4 ASYM | `SAM3OVVariant.INT4_ASYM` | W4A16 weight-only | Similar to INT4 SYM |
 
 **Device support:** `"CPU"`, `"GPU"` (Intel iGPU/dGPU), or `"AUTO"`.
 PyTorch-style names (`"xpu"`, `"cuda"`) are mapped to the OpenVINO `"GPU"` device automatically.
