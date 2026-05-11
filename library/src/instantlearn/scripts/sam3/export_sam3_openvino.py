@@ -1,10 +1,11 @@
 # Copyright (C) 2025-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""Export SAM3 PyTorch model to OpenVINO IR via ONNX.
+"""Export and quantize SAM3 PyTorch model to OpenVINO IR via ONNX.
 
 Loads the official ``Sam3Model`` weights from HuggingFace (or a local
-checkpoint), exports each sub-component to ONNX, then converts to OpenVINO IR.
+checkpoint), exports each sub-component to ONNX, converts to OpenVINO IR,
+and optionally applies NNCF weight compression (INT8/INT4).
 
 Produces 5 OpenVINO IR models (4-model split + exemplar variant):
 
@@ -29,6 +30,14 @@ Usage:
 
     # Only convert existing ONNX models to OpenVINO IR (skip PyTorch export)
     python export_sam3_openvino.py --onnx-dir ./sam3-onnx --output-dir ./sam3-openvino --skip-export
+
+    # Quantize existing FP16 IR models with INT8 symmetric weight compression
+    python export_sam3_openvino.py --quantize --compression-modes int8_sym \\
+        --source-dir ./sam3-openvino/openvino-fp16 --output-dir ./sam3-openvino
+
+    # Run all compression modes and compare sizes
+    python export_sam3_openvino.py --quantize --compression-modes all \\
+        --source-dir ./sam3-openvino/openvino-fp16 --output-dir ./sam3-openvino --compare
 """
 
 import argparse
@@ -64,7 +73,7 @@ def export_from_pytorch(
     from transformers import CLIPTokenizerFast  # noqa: PLC0415
 
     from instantlearn.models.sam3.model import Sam3Model  # noqa: PLC0415
-    from instantlearn.models.sam3.onnx_export import export_sam3_to_onnx  # noqa: PLC0415
+    from instantlearn.scripts.sam3.onnx_export import export_sam3_to_onnx  # noqa: PLC0415
 
     logger.info("Loading Sam3Model from '%s'...", model_id)
     model = Sam3Model.from_pretrained(model_id, device="cpu", dtype=torch.float32)
@@ -106,7 +115,7 @@ def convert_to_openvino(
     Returns:
         Mapping from model name to ``.xml`` path.
     """
-    from instantlearn.models.sam3.onnx_export import convert_onnx_to_openvino  # noqa: PLC0415
+    from instantlearn.scripts.sam3.onnx_export import convert_onnx_to_openvino  # noqa: PLC0415
 
     compress_to_fp16 = precision == "fp16"
     converted = convert_onnx_to_openvino(
@@ -242,10 +251,157 @@ def validate_openvino_models(  # noqa: PLR0915
     logger.info("Validation complete!")
 
 
+# -- Weight compression (quantization) --
+
+# Canonical model names (5-model split)
+MODEL_NAMES = [
+    "vision-encoder",
+    "text-encoder",
+    "geometry-encoder",
+    "geometry-encoder-exemplar",
+    "prompt-decoder",
+]
+
+# Tokenizer files needed for inference
+_TOKENIZER_FILES = [
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "vocab.json",
+    "merges.txt",
+]
+
+
+def apply_weight_compression(
+    source_dir: Path,
+    output_dir: Path,
+    mode: str = "int8_sym",
+) -> Path:
+    """Apply weight compression to SAM3 OpenVINO IR models.
+
+    Args:
+        source_dir: Directory containing FP16 OpenVINO IR models.
+        output_dir: Base output directory.
+        mode: Compression mode string (e.g. ``"int8_sym"``, ``"int4_sym"``).
+
+    Returns:
+        Path to directory containing compressed OpenVINO IR models.
+    """
+    import openvino as ov  # noqa: PLC0415
+
+    from instantlearn.utils.compression import compress_model  # noqa: PLC0415
+    from instantlearn.utils.constants import CompressionMode  # noqa: PLC0415
+
+    compression_mode = CompressionMode(mode)
+
+    logger.info("=" * 60)
+    logger.info("Applying %s weight compression", mode.upper())
+    logger.info("=" * 60)
+
+    ir_dir = output_dir / f"openvino-{mode}"
+    ir_dir.mkdir(parents=True, exist_ok=True)
+
+    core = ov.Core()
+    logger.info("Compressing %d models", len(MODEL_NAMES))
+
+    for model_name in MODEL_NAMES:
+        xml_path = source_dir / f"{model_name}.xml"
+        if not xml_path.exists():
+            logger.warning("Source model not found: %s", xml_path)
+            continue
+
+        logger.info("Compressing %s with %s...", model_name, mode.upper())
+
+        ov_model = core.read_model(xml_path)
+
+        try:
+            compressed_model = compress_model(ov_model, mode=compression_mode, group_size=-1)
+        except Exception:
+            logger.exception("Failed to compress %s with %s", model_name, mode)
+            continue
+
+        out_xml = ir_dir / f"{model_name}.xml"
+        ov.save_model(compressed_model, out_xml)
+
+        bin_path = ir_dir / f"{model_name}.bin"
+        size_mb = bin_path.stat().st_size / (1024 * 1024)
+        logger.info("Saved: %s (%.1f MB)", out_xml, size_mb)
+
+    # Copy tokenizer files from source
+    for filename in _TOKENIZER_FILES:
+        src = source_dir / filename
+        dst = ir_dir / filename
+        if src.exists() and not dst.exists():
+            shutil.copy2(src, dst)
+
+    return ir_dir
+
+
+def get_dir_size(directory: Path) -> float:
+    """Get total size of model files in a directory in MB.
+
+    Args:
+        directory: Directory to measure.
+
+    Returns:
+        Total size in megabytes.
+    """
+    total = 0
+    for ext in ("*.xml", "*.bin", "*.onnx"):
+        for f in directory.glob(ext):
+            total += f.stat().st_size
+    return total / (1024 * 1024)
+
+
+def print_comparison_table(output_dir: Path) -> None:
+    """Print a comparison table of all quantized variants.
+
+    Args:
+        output_dir: Base output directory containing variant subdirectories.
+    """
+    from rich.console import Console  # noqa: PLC0415
+    from rich.table import Table  # noqa: PLC0415
+
+    console = Console()
+    table = Table(title="SAM3 Quantization Comparison", show_header=True)
+    table.add_column("Variant", style="cyan", width=20)
+    table.add_column("Total", justify="right", style="bold")
+    table.add_column("Model Count", justify="right")
+    table.add_column("Status", style="green")
+
+    variant_dirs = sorted([*output_dir.glob("openvino-*"), *output_dir.glob("onnx-*")])
+    for variant_dir in variant_dirs:
+        if not variant_dir.is_dir():
+            continue
+        variant_name = variant_dir.name
+        for prefix in ("openvino-", "onnx-"):
+            variant_name = variant_name.replace(prefix, "", 1) if variant_name.startswith(prefix) else variant_name
+        fmt = "IR" if variant_dir.name.startswith("openvino") else "ONNX"
+        variant_label = f"{variant_name} ({fmt})"
+
+        total_size = 0.0
+        found = 0
+        for model_name in MODEL_NAMES:
+            bin_path = variant_dir / f"{model_name}.bin"
+            if bin_path.exists():
+                total_size += bin_path.stat().st_size / (1024 * 1024)
+                found += 1
+            else:
+                onnx_files = list(variant_dir.glob(f"{model_name}*.onnx"))
+                if onnx_files:
+                    total_size += onnx_files[0].stat().st_size / (1024 * 1024)
+                    found += 1
+
+        status = "OK" if found == len(MODEL_NAMES) else f"Missing {len(MODEL_NAMES) - found}"
+        table.add_row(variant_label, f"{total_size:.1f} MB", f"{found}/{len(MODEL_NAMES)}", status)
+
+    console.print(table)
+
+
 def main() -> None:
-    """CLI entry point for SAM3 PyTorch → ONNX → OpenVINO export."""
+    """CLI entry point for SAM3 PyTorch → ONNX → OpenVINO export and quantization."""
     parser = argparse.ArgumentParser(
-        description="Export SAM3 PyTorch model to OpenVINO IR via ONNX (5-model split).",
+        description="Export SAM3 PyTorch model to OpenVINO IR via ONNX, with optional weight compression.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -263,6 +419,14 @@ Examples:
 
   # Export and validate
   python export_sam3_openvino.py --output-dir ./sam3-openvino --validate
+
+  # Quantize existing FP16 IR with INT8 symmetric weight compression
+  python export_sam3_openvino.py --quantize --compression-modes int8_sym \\
+      --source-dir ./sam3-openvino/openvino-fp16 --output-dir ./sam3-openvino
+
+  # Run all compression modes and compare
+  python export_sam3_openvino.py --quantize --compression-modes all \\
+      --source-dir ./sam3-openvino/openvino-fp16 --output-dir ./sam3-openvino --compare
         """,
     )
     parser.add_argument(
@@ -319,6 +483,31 @@ Examples:
         help="OpenVINO device for validation. Default: CPU",
     )
 
+    # -- Weight compression arguments --
+    parser.add_argument(
+        "--quantize",
+        action="store_true",
+        help="Apply NNCF weight compression to existing FP16 IR models.",
+    )
+    parser.add_argument(
+        "--compression-modes",
+        type=str,
+        nargs="+",
+        default=["int8_sym"],
+        help="Compression modes: int8_sym, int8_asym, int4_sym, int4_asym, or 'all'. Default: int8_sym",
+    )
+    parser.add_argument(
+        "--source-dir",
+        type=Path,
+        default=None,
+        help="Directory with FP16 OpenVINO IR models (required for --quantize).",
+    )
+    parser.add_argument(
+        "--compare",
+        action="store_true",
+        help="Print comparison table of all variants in output-dir.",
+    )
+
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -361,6 +550,36 @@ Examples:
             device=args.device,
             resolution=args.resolution,
         )
+
+    # Step 4: Weight compression (quantization)
+    if args.quantize:
+        if args.source_dir is None:
+            parser.error("--source-dir is required when using --quantize")
+
+        all_modes = ["int8_sym", "int8_asym", "int4_sym", "int4_asym"]
+        modes = all_modes if "all" in args.compression_modes else args.compression_modes
+
+        result_dirs: dict[str, Path] = {}
+        for mode in modes:
+            try:
+                result_dirs[mode] = apply_weight_compression(args.source_dir, args.output_dir, mode)
+            except Exception:  # noqa: PERF203
+                logger.exception("Failed compression: %s", mode)
+
+        if args.validate:
+            for name, result_dir in result_dirs.items():
+                logger.info("-" * 60)
+                logger.info("Validating: %s", name)
+                validate_openvino_models(result_dir, device=args.device, resolution=args.resolution)
+
+        logger.info("=" * 60)
+        logger.info("Quantization complete!")
+        for name, result_dir in result_dirs.items():
+            size = get_dir_size(result_dir)
+            logger.info("  %s: %s (%.1f MB model files)", name, result_dir, size)
+
+        if args.compare or "all" in args.compression_modes:
+            print_comparison_table(args.output_dir)
 
     logger.info("Done! Models saved to: %s", args.output_dir)
 

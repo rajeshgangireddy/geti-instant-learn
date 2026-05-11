@@ -32,7 +32,7 @@ import torch
 from torch import nn
 
 if TYPE_CHECKING:
-    from .model import Sam3Model
+    from instantlearn.models.sam3.model import Sam3Model
 
 logger = logging.getLogger(__name__)
 
@@ -256,7 +256,7 @@ class OnnxPromptDecoder(nn.Module):
         Returns:
             Tuple of ``(pred_masks, pred_boxes, pred_logits, presence_logits)``.
         """
-        from .common import box_cxcywh_to_xyxy, inverse_sigmoid  # noqa: PLC0415
+        from instantlearn.models.sam3.common import box_cxcywh_to_xyxy, inverse_sigmoid  # noqa: PLC0415
 
         # DETR encoder -- uses only the 1x scale as the vision "level"
         encoder_outputs = self.detr_encoder(
