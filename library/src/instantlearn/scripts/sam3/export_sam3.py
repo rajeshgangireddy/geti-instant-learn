@@ -1,7 +1,7 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""Export and quantize SAM3 PyTorch model to OpenVINO IR via ONNX.
+"""Export SAM3 PyTorch model to OpenVINO IR via ONNX.
 
 Loads the official ``Sam3Model`` weights from HuggingFace (or a local
 checkpoint), exports each sub-component to ONNX, converts to OpenVINO IR,
@@ -16,29 +16,24 @@ Produces 5 OpenVINO IR models (4-model split + exemplar variant):
 * ``prompt-decoder``   — DETR encoder/decoder + box head + scoring + mask decoder
 
 Usage:
-    # Export from HuggingFace (default: facebook/sam3) to FP16 OpenVINO IR
-    python export_sam3_openvino.py --output-dir ./sam3-openvino
+    python export_sam3.py --output-dir ./sam3-openvino
 
-    # Export with FP32 precision
-    python export_sam3_openvino.py --output-dir ./sam3-openvino --precision fp32
+    python export_sam3.py --output-dir ./sam3-openvino --precision fp32
 
-    # Export from a local checkpoint
-    python export_sam3_openvino.py --model-id /path/to/sam3.pt --output-dir ./sam3-openvino
+    python export_sam3.py --model-id /path/to/sam3.pt --output-dir ./sam3-openvino
 
-    # Export and validate with dummy inference
-    python export_sam3_openvino.py --output-dir ./sam3-openvino --validate
+    python export_sam3.py --output-dir ./sam3-openvino --validate
 
-    # Only convert existing ONNX models to OpenVINO IR (skip PyTorch export)
-    python export_sam3_openvino.py --onnx-dir ./sam3-onnx --output-dir ./sam3-openvino --skip-export
+    python export_sam3.py --onnx-dir ./sam3-onnx --output-dir ./sam3-openvino --skip-export
 
-    # Quantize existing FP16 IR models with INT8 symmetric weight compression
-    python export_sam3_openvino.py --quantize --compression-modes int8_sym \\
+    python export_sam3.py --quantize --compression-modes int8_sym \\
         --source-dir ./sam3-openvino/openvino-fp16 --output-dir ./sam3-openvino
 
-    # Run all compression modes and compare sizes
-    python export_sam3_openvino.py --quantize --compression-modes all \\
+    python export_sam3.py --quantize --compression-modes all \\
         --source-dir ./sam3-openvino/openvino-fp16 --output-dir ./sam3-openvino --compare
 """
+
+from __future__ import annotations
 
 import argparse
 import logging
@@ -50,45 +45,218 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Canonical sub-model names (5-model split)
+MODEL_NAMES = [
+    "vision-encoder",
+    "text-encoder",
+    "geometry-encoder",
+    "geometry-encoder-exemplar",
+    "prompt-decoder",
+]
 
-def export_from_pytorch(
+_VISION_ENCODER = "vision-encoder"
+_TEXT_ENCODER = "text-encoder"
+_GEOMETRY_ENCODER = "geometry-encoder"
+_GEOMETRY_ENCODER_EXEMPLAR = "geometry-encoder-exemplar"
+_PROMPT_DECODER = "prompt-decoder"
+
+# Tokenizer files needed for inference
+_TOKENIZER_FILES = [
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "vocab.json",
+    "merges.txt",
+]
+
+
+# ONNX export
+
+def export_to_onnx(  # noqa: PLR0915
     model_id: str,
     output_dir: Path,
     *,
     resolution: int = 1008,
     opset_version: int = 17,
-) -> dict[str, Path]:
+) -> tuple[Path, dict[str, Path]]:
     """Load Sam3Model and export all sub-components to ONNX.
+
+    Produces 5 ONNX files plus the tokenizer in *output_dir* / ``onnx``.
 
     Args:
         model_id: HuggingFace model ID or local path to ``sam3.pt``.
-        output_dir: Directory to write the ONNX files and tokenizer.
+        output_dir: Base output directory. ONNX files go into ``output_dir/onnx``.
         resolution: Input image resolution.
         opset_version: ONNX opset version.
 
     Returns:
-        Mapping from model name to ONNX file path.
+        ``(onnx_dir, exported)`` — path to the ONNX directory and a mapping
+        from model name to ONNX file path.
     """
     import torch  # noqa: PLC0415
     from transformers import CLIPTokenizerFast  # noqa: PLC0415
 
     from instantlearn.models.sam3.model import Sam3Model  # noqa: PLC0415
-    from instantlearn.scripts.sam3.export_sam3_onnx import export_sam3_to_onnx  # noqa: PLC0415
+    from instantlearn.scripts.sam3.onnx_wrappers import (  # noqa: PLC0415
+        OnnxGeometryEncoder,
+        OnnxPromptDecoder,
+        OnnxTextEncoder,
+        OnnxVisionEncoder,
+    )
 
     logger.info("Loading Sam3Model from '%s'...", model_id)
     model = Sam3Model.from_pretrained(model_id, device="cpu", dtype=torch.float32)
     model.eval()
     logger.info("Model loaded successfully.")
 
-    # Export ONNX
     onnx_dir = output_dir / "onnx"
-    with torch.no_grad():
-        exported = export_sam3_to_onnx(
-            model,
-            onnx_dir,
-            resolution=resolution,
-            opset_version=opset_version,
-        )
+    onnx_dir.mkdir(parents=True, exist_ok=True)
+    device = next(model.parameters()).device
+
+    exported: dict[str, Path] = {}
+
+    # 1. Vision encoder
+    logger.info("Exporting vision encoder...")
+    vision_wrapper = OnnxVisionEncoder(model)
+    vision_wrapper.eval()
+    dummy_pixel = torch.randn(1, 3, resolution, resolution, device=device)
+    vision_path = onnx_dir / f"{_VISION_ENCODER}.onnx"
+    torch.onnx.export(
+        vision_wrapper,
+        (dummy_pixel,),
+        str(vision_path),
+        opset_version=opset_version,
+        dynamo=False,
+        input_names=["pixel_values"],
+        output_names=["fpn_feat_0", "fpn_feat_1", "fpn_feat_2", "fpn_pos_2"],
+        dynamic_axes={"pixel_values": {0: "batch"}},
+    )
+    exported[_VISION_ENCODER] = vision_path
+    logger.info("  -> %s", vision_path)
+
+    # 2. Text encoder
+    logger.info("Exporting text encoder...")
+    text_wrapper = OnnxTextEncoder(model)
+    text_wrapper.eval()
+    dummy_ids = torch.ones(1, 32, dtype=torch.long, device=device)
+    dummy_mask = torch.ones(1, 32, dtype=torch.long, device=device)
+    text_path = onnx_dir / f"{_TEXT_ENCODER}.onnx"
+    torch.onnx.export(
+        text_wrapper,
+        (dummy_ids, dummy_mask),
+        str(text_path),
+        opset_version=opset_version,
+        dynamo=False,
+        input_names=["input_ids", "attention_mask"],
+        output_names=["text_features", "text_mask"],
+        dynamic_axes={
+            "input_ids": {0: "batch"},
+            "attention_mask": {0: "batch"},
+        },
+    )
+    exported[_TEXT_ENCODER] = text_path
+    logger.info("  -> %s", text_path)
+
+    # 3. Geometry encoder (classic)
+    logger.info("Exporting geometry encoder (classic)...")
+    geo_wrapper = OnnxGeometryEncoder(model, drop_spatial_bias=False)
+    geo_wrapper.eval()
+    feat_size = resolution // 14
+    dummy_fpn = torch.randn(1, 256, feat_size, feat_size, device=device)
+    dummy_pos = torch.randn(1, 256, feat_size, feat_size, device=device)
+    dummy_boxes = torch.rand(1, 1, 4, device=device)
+    dummy_box_labels = torch.ones(1, 1, dtype=torch.long, device=device)
+    dummy_points = torch.rand(1, 1, 2, device=device)
+    dummy_point_labels = torch.full((1, 1), -10, dtype=torch.long, device=device)
+
+    geo_path = onnx_dir / f"{_GEOMETRY_ENCODER}.onnx"
+    torch.onnx.export(
+        geo_wrapper,
+        (dummy_fpn, dummy_pos, dummy_boxes, dummy_box_labels, dummy_points, dummy_point_labels),
+        str(geo_path),
+        opset_version=opset_version,
+        dynamo=False,
+        input_names=[
+            "fpn_feat_2", "fpn_pos_2",
+            "input_boxes", "input_boxes_labels",
+            "input_points", "input_points_labels",
+        ],
+        output_names=["geometry_features", "geometry_mask"],
+        dynamic_axes={
+            "input_boxes": {0: "batch", 1: "num_boxes"},
+            "input_boxes_labels": {0: "batch", 1: "num_boxes"},
+            "input_points": {0: "batch", 1: "num_points"},
+            "input_points_labels": {0: "batch", 1: "num_points"},
+        },
+    )
+    exported[_GEOMETRY_ENCODER] = geo_path
+    logger.info("  -> %s", geo_path)
+
+    # 4. Geometry encoder (exemplar, drop_spatial_bias=True)
+    logger.info("Exporting geometry encoder (exemplar)...")
+    geo_exemplar_wrapper = OnnxGeometryEncoder(model, drop_spatial_bias=True)
+    geo_exemplar_wrapper.eval()
+    dummy_boxes_ignore = torch.zeros(1, 1, 4, device=device)
+    dummy_box_labels_ignore = torch.full((1, 1), -10, dtype=torch.long, device=device)
+    dummy_ex_points = torch.rand(1, 1, 2, device=device)
+    dummy_ex_point_labels = torch.ones(1, 1, dtype=torch.long, device=device)
+
+    geo_exemplar_path = onnx_dir / f"{_GEOMETRY_ENCODER_EXEMPLAR}.onnx"
+    torch.onnx.export(
+        geo_exemplar_wrapper,
+        (dummy_fpn, dummy_pos, dummy_boxes_ignore, dummy_box_labels_ignore,
+         dummy_ex_points, dummy_ex_point_labels),
+        str(geo_exemplar_path),
+        opset_version=opset_version,
+        dynamo=False,
+        input_names=[
+            "fpn_feat_2", "fpn_pos_2",
+            "input_boxes", "input_boxes_labels",
+            "input_points", "input_points_labels",
+        ],
+        output_names=["geometry_features", "geometry_mask"],
+        dynamic_axes={
+            "input_boxes": {0: "batch", 1: "num_boxes"},
+            "input_boxes_labels": {0: "batch", 1: "num_boxes"},
+            "input_points": {0: "batch", 1: "num_points"},
+            "input_points_labels": {0: "batch", 1: "num_points"},
+        },
+    )
+    exported[_GEOMETRY_ENCODER_EXEMPLAR] = geo_exemplar_path
+    logger.info("  -> %s", geo_exemplar_path)
+
+    # 5. Prompt decoder
+    logger.info("Exporting prompt decoder...")
+    decoder_wrapper = OnnxPromptDecoder(model)
+    decoder_wrapper.eval()
+    feat_4x = feat_size * 4
+    feat_2x = feat_size * 2
+    dummy_f0 = torch.randn(1, 256, feat_4x, feat_4x, device=device)
+    dummy_f1 = torch.randn(1, 256, feat_2x, feat_2x, device=device)
+    dummy_f2 = torch.randn(1, 256, feat_size, feat_size, device=device)
+    dummy_p2 = torch.randn(1, 256, feat_size, feat_size, device=device)
+    dummy_prompt = torch.randn(1, 32, 256, device=device)
+    dummy_pmask = torch.ones(1, 32, dtype=torch.bool, device=device)
+
+    decoder_path = onnx_dir / f"{_PROMPT_DECODER}.onnx"
+    torch.onnx.export(
+        decoder_wrapper,
+        (dummy_f0, dummy_f1, dummy_f2, dummy_p2, dummy_prompt, dummy_pmask),
+        str(decoder_path),
+        opset_version=opset_version,
+        dynamo=False,
+        input_names=[
+            "fpn_feat_0", "fpn_feat_1", "fpn_feat_2", "fpn_pos_2",
+            "prompt_features", "prompt_mask",
+        ],
+        output_names=["pred_masks", "pred_boxes", "pred_logits", "presence_logits"],
+        dynamic_axes={
+            "prompt_features": {0: "batch", 1: "prompt_len"},
+            "prompt_mask": {0: "batch", 1: "prompt_len"},
+        },
+    )
+    exported[_PROMPT_DECODER] = decoder_path
+    logger.info("  -> %s", decoder_path)
 
     # Save tokenizer alongside the ONNX files
     logger.info("Saving tokenizer...")
@@ -96,8 +264,11 @@ def export_from_pytorch(
     tokenizer.save_pretrained(str(onnx_dir))
     logger.info("  Tokenizer saved to %s", onnx_dir)
 
-    return exported
+    logger.info("ONNX export complete. %d models written to %s", len(exported), onnx_dir)
+    return onnx_dir, exported
 
+
+# ONNX → OpenVINO IR conversion
 
 def convert_to_openvino(
     onnx_dir: Path,
@@ -105,42 +276,51 @@ def convert_to_openvino(
     *,
     precision: str = "fp16",
 ) -> dict[str, Path]:
-    """Convert all SAM3 ONNX models to OpenVINO IR.
+    """Convert all SAM3 ONNX models to OpenVINO IR and copy tokenizer.
 
     Args:
-        onnx_dir: Directory containing ONNX files from ``export_from_pytorch``.
+        onnx_dir: Directory containing ONNX files from :func:`export_to_onnx`.
         output_dir: Directory to write OpenVINO IR files.
-        precision: Target precision (``"fp32"`` or ``"fp16"``).
+        precision: ``"fp32"`` or ``"fp16"``.
 
     Returns:
         Mapping from model name to ``.xml`` path.
     """
-    from instantlearn.scripts.sam3.export_sam3_onnx import convert_onnx_to_openvino  # noqa: PLC0415
+    import openvino as ov  # noqa: PLC0415
 
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     compress_to_fp16 = precision == "fp16"
-    converted = convert_onnx_to_openvino(
-        onnx_dir,
-        output_dir,
-        compress_to_fp16=compress_to_fp16,
-    )
 
-    # Copy tokenizer files to the IR output directory
-    tokenizer_files = [
-        "tokenizer.json",
-        "tokenizer_config.json",
-        "special_tokens_map.json",
-        "vocab.json",
-        "merges.txt",
-    ]
-    for filename in tokenizer_files:
+    converted: dict[str, Path] = {}
+    for name in MODEL_NAMES:
+        onnx_path = onnx_dir / f"{name}.onnx"
+        if not onnx_path.exists():
+            onnx_path = onnx_dir / f"{name}-fp16.onnx"
+        if not onnx_path.exists():
+            logger.warning("Skipping %s — ONNX file not found.", name)
+            continue
+
+        logger.info("Converting %s to OpenVINO IR...", name)
+        ov_model = ov.convert_model(str(onnx_path))
+        ir_path = output_dir / f"{name}.xml"
+        ov.save_model(ov_model, str(ir_path), compress_to_fp16=compress_to_fp16)
+        converted[name] = ir_path
+        logger.info("  -> %s", ir_path)
+
+    # Copy tokenizer files from source
+    for filename in _TOKENIZER_FILES:
         src = onnx_dir / filename
         dst = output_dir / filename
         if src.exists() and not dst.exists():
             shutil.copy2(src, dst)
             logger.info("Copied tokenizer file: %s", filename)
 
+    logger.info("OpenVINO conversion complete. %d models written to %s", len(converted), output_dir)
     return converted
 
+
+# Validation
 
 def validate_openvino_models(  # noqa: PLR0915
     model_dir: Path,
@@ -158,7 +338,7 @@ def validate_openvino_models(  # noqa: PLR0915
 
     core = ov.Core()
     rng = np.random.default_rng(42)
-    feat_size = resolution // 14  # 72 for 1008
+    feat_size = resolution // 14
 
     logger.info("Validating OpenVINO models in %s...", model_dir)
 
@@ -253,25 +433,6 @@ def validate_openvino_models(  # noqa: PLR0915
 
 # Weight compression (quantization)
 
-# Canonical model names (5-model split)
-MODEL_NAMES = [
-    "vision-encoder",
-    "text-encoder",
-    "geometry-encoder",
-    "geometry-encoder-exemplar",
-    "prompt-decoder",
-]
-
-# Tokenizer files needed for inference
-_TOKENIZER_FILES = [
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "special_tokens_map.json",
-    "vocab.json",
-    "merges.txt",
-]
-
-
 def apply_weight_compression(
     source_dir: Path,
     output_dir: Path,
@@ -337,6 +498,8 @@ def apply_weight_compression(
     return ir_dir
 
 
+# Reporting utilities
+
 def get_dir_size(directory: Path) -> float:
     """Get total size of model files in a directory in MB.
 
@@ -398,6 +561,8 @@ def print_comparison_table(output_dir: Path) -> None:
     console.print(table)
 
 
+# CLI
+
 def main() -> None:
     """CLI entry point for SAM3 PyTorch → ONNX → OpenVINO export and quantization."""
     parser = argparse.ArgumentParser(
@@ -406,26 +571,26 @@ def main() -> None:
         epilog="""
 Examples:
   # Full pipeline: PyTorch → ONNX → OpenVINO IR (FP16)
-  python export_sam3_openvino.py --output-dir ./sam3-openvino
+  python export_sam3.py --output-dir ./sam3-openvino
 
   # FP32 precision
-  python export_sam3_openvino.py --output-dir ./sam3-openvino --precision fp32
+  python export_sam3.py --output-dir ./sam3-openvino --precision fp32
 
   # From local checkpoint
-  python export_sam3_openvino.py --model-id /path/to/sam3.pt --output-dir ./sam3-openvino
+  python export_sam3.py --model-id /path/to/sam3.pt --output-dir ./sam3-openvino
 
   # Only convert existing ONNX to OpenVINO IR
-  python export_sam3_openvino.py --onnx-dir ./sam3-onnx --output-dir ./sam3-openvino --skip-export
+  python export_sam3.py --onnx-dir ./sam3-onnx --output-dir ./sam3-openvino --skip-export
 
   # Export and validate
-  python export_sam3_openvino.py --output-dir ./sam3-openvino --validate
+  python export_sam3.py --output-dir ./sam3-openvino --validate
 
   # Quantize existing FP16 IR with INT8 symmetric weight compression
-  python export_sam3_openvino.py --quantize --compression-modes int8_sym \\
+  python export_sam3.py --quantize --compression-modes int8_sym \\
       --source-dir ./sam3-openvino/openvino-fp16 --output-dir ./sam3-openvino
 
   # Run all compression modes and compare
-  python export_sam3_openvino.py --quantize --compression-modes all \\
+  python export_sam3.py --quantize --compression-modes all \\
       --source-dir ./sam3-openvino/openvino-fp16 --output-dir ./sam3-openvino --compare
         """,
     )
@@ -482,8 +647,6 @@ Examples:
         default="CPU",
         help="OpenVINO device for validation. Default: CPU",
     )
-
-    # Weight compression arguments
     parser.add_argument(
         "--quantize",
         action="store_true",
@@ -523,20 +686,20 @@ Examples:
         onnx_dir = args.onnx_dir
         logger.info("Skipping PyTorch export; using ONNX models from %s", onnx_dir)
     else:
-        exported = export_from_pytorch(
+        onnx_dir, exported = export_to_onnx(
             model_id=args.model_id,
             output_dir=args.output_dir,
             resolution=args.resolution,
             opset_version=args.opset_version,
         )
-        onnx_dir = args.output_dir / "onnx"
         logger.info("ONNX export complete: %s", list(exported.keys()))
 
     # Step 2: ONNX → OpenVINO IR
+    ir_dir = args.output_dir / f"openvino-{args.precision}"
     logger.info("Converting ONNX → OpenVINO IR (precision=%s)...", args.precision)
     converted = convert_to_openvino(
         onnx_dir=onnx_dir,
-        output_dir=args.output_dir,
+        output_dir=ir_dir,
         precision=args.precision,
     )
     logger.info("OpenVINO conversion complete!")
@@ -546,7 +709,7 @@ Examples:
     # Step 3: Validate
     if args.validate:
         validate_openvino_models(
-            args.output_dir,
+            ir_dir,
             device=args.device,
             resolution=args.resolution,
         )

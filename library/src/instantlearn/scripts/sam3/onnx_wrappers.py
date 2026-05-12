@@ -1,13 +1,13 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""ONNX export wrappers for SAM3 sub-components.
+"""ONNX-exportable ``nn.Module`` wrappers for SAM3 sub-components.
 
-Each wrapper class isolates a portion of ``Sam3Model`` into a standalone
-``nn.Module`` with a clean ``forward()`` signature that can be exported
-with ``torch.onnx.export()``.
+Each wrapper isolates a portion of ``Sam3Model`` into a standalone
+``nn.Module`` with a clean ``forward()`` signature suitable for
+``torch.onnx.export()``.
 
-The 5-model split is designed for maximum flexibility:
+The 5-model split:
 
 1. **Vision encoder** — ViT backbone + FPN neck.
 2. **Text encoder** — CLIP text encoder + linear projection.
@@ -20,12 +20,14 @@ The 5-model split is designed for maximum flexibility:
 
 Text and geometry feature concatenation is performed in Python at inference time
 (inside ``SAM3OpenVINO``), enabling both *classic* and *visual-exemplar* modes.
+
+See Also:
+    :mod:`instantlearn.scripts.sam3.export_sam3` — export pipeline and CLI
+    that uses these wrappers.
 """
 
 from __future__ import annotations
 
-import logging
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
@@ -33,8 +35,6 @@ from torch import nn
 
 if TYPE_CHECKING:
     from instantlearn.models.sam3.model import Sam3Model
-
-logger = logging.getLogger(__name__)
 
 
 class OnnxVisionEncoder(nn.Module):
@@ -311,256 +311,3 @@ class OnnxPromptDecoder(nn.Module):
             pred_logits,
             presence_logits,
         )
-
-
-_VISION_ENCODER_NAME = "vision-encoder"
-_TEXT_ENCODER_NAME = "text-encoder"
-_GEOMETRY_ENCODER_NAME = "geometry-encoder"
-_GEOMETRY_ENCODER_EXEMPLAR_NAME = "geometry-encoder-exemplar"
-_PROMPT_DECODER_NAME = "prompt-decoder"
-
-
-def export_sam3_to_onnx(  # noqa: PLR0915
-    model: Sam3Model,
-    output_dir: str | Path,
-    *,
-    resolution: int = 1008,
-    opset_version: int = 17,
-) -> dict[str, Path]:
-    """Export all SAM3 sub-components to ONNX.
-
-    Produces 5 ONNX files in *output_dir*:
-
-    * ``vision-encoder.onnx``
-    * ``text-encoder.onnx``
-    * ``geometry-encoder.onnx``  (classic mode, ``drop_spatial_bias=False``)
-    * ``geometry-encoder-exemplar.onnx``  (exemplar fit, ``drop_spatial_bias=True``)
-    * ``prompt-decoder.onnx``
-
-    Args:
-        model: A loaded ``Sam3Model`` instance (on CPU, eval mode).
-        output_dir: Directory to write the ONNX files into.
-        resolution: Input image resolution (default ``1008``).
-        opset_version: ONNX opset version (default ``17``).
-
-    Returns:
-        Mapping from model name to the written ONNX path.
-    """
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    model.eval()
-    device = next(model.parameters()).device
-
-    exported: dict[str, Path] = {}
-
-    # 1. Vision encoder
-    logger.info("Exporting vision encoder...")
-    vision_wrapper = OnnxVisionEncoder(model)
-    vision_wrapper.eval()
-    dummy_pixel = torch.randn(1, 3, resolution, resolution, device=device)
-    vision_path = output_dir / f"{_VISION_ENCODER_NAME}.onnx"
-    torch.onnx.export(
-        vision_wrapper,
-        (dummy_pixel,),
-        str(vision_path),
-        opset_version=opset_version,
-        dynamo=False,
-        input_names=["pixel_values"],
-        output_names=["fpn_feat_0", "fpn_feat_1", "fpn_feat_2", "fpn_pos_2"],
-        dynamic_axes={"pixel_values": {0: "batch"}},
-    )
-    exported[_VISION_ENCODER_NAME] = vision_path
-    logger.info("  -> %s", vision_path)
-
-    # 2. Text encoder
-    logger.info("Exporting text encoder...")
-    text_wrapper = OnnxTextEncoder(model)
-    text_wrapper.eval()
-    dummy_ids = torch.ones(1, 32, dtype=torch.long, device=device)
-    dummy_mask = torch.ones(1, 32, dtype=torch.long, device=device)
-    text_path = output_dir / f"{_TEXT_ENCODER_NAME}.onnx"
-    torch.onnx.export(
-        text_wrapper,
-        (dummy_ids, dummy_mask),
-        str(text_path),
-        opset_version=opset_version,
-        dynamo=False,
-        input_names=["input_ids", "attention_mask"],
-        output_names=["text_features", "text_mask"],
-        dynamic_axes={
-            "input_ids": {0: "batch"},
-            "attention_mask": {0: "batch"},
-        },
-    )
-    exported[_TEXT_ENCODER_NAME] = text_path
-    logger.info("  -> %s", text_path)
-
-    # 3. Geometry encoder (classic)
-    logger.info("Exporting geometry encoder (classic)...")
-    geo_wrapper = OnnxGeometryEncoder(model, drop_spatial_bias=False)
-    geo_wrapper.eval()
-    # Compute FPN feature sizes from resolution
-    # At 1x FPN scale: resolution / patch_size(14) = 72 (for 1008)
-    feat_size = resolution // 14
-    dummy_fpn = torch.randn(1, 256, feat_size, feat_size, device=device)
-    dummy_pos = torch.randn(1, 256, feat_size, feat_size, device=device)
-    dummy_boxes = torch.rand(1, 1, 4, device=device)
-    dummy_box_labels = torch.ones(1, 1, dtype=torch.long, device=device)
-    dummy_points = torch.rand(1, 1, 2, device=device)
-    dummy_point_labels = torch.full((1, 1), -10, dtype=torch.long, device=device)
-
-    geo_path = output_dir / f"{_GEOMETRY_ENCODER_NAME}.onnx"
-    torch.onnx.export(
-        geo_wrapper,
-        (dummy_fpn, dummy_pos, dummy_boxes, dummy_box_labels, dummy_points, dummy_point_labels),
-        str(geo_path),
-        opset_version=opset_version,
-        dynamo=False,
-        input_names=[
-            "fpn_feat_2",
-            "fpn_pos_2",
-            "input_boxes",
-            "input_boxes_labels",
-            "input_points",
-            "input_points_labels",
-        ],
-        output_names=["geometry_features", "geometry_mask"],
-        dynamic_axes={
-            "input_boxes": {0: "batch", 1: "num_boxes"},
-            "input_boxes_labels": {0: "batch", 1: "num_boxes"},
-            "input_points": {0: "batch", 1: "num_points"},
-            "input_points_labels": {0: "batch", 1: "num_points"},
-        },
-    )
-    exported[_GEOMETRY_ENCODER_NAME] = geo_path
-    logger.info("  -> %s", geo_path)
-
-    # 4. Geometry encoder (exemplar, drop_spatial_bias=True)
-    logger.info("Exporting geometry encoder (exemplar)...")
-    geo_exemplar_wrapper = OnnxGeometryEncoder(model, drop_spatial_bias=True)
-    geo_exemplar_wrapper.eval()
-    # Exemplar mode uses points only (boxes converted to center points)
-    dummy_boxes_ignore = torch.zeros(1, 1, 4, device=device)
-    dummy_box_labels_ignore = torch.full((1, 1), -10, dtype=torch.long, device=device)
-    dummy_ex_points = torch.rand(1, 1, 2, device=device)
-    dummy_ex_point_labels = torch.ones(1, 1, dtype=torch.long, device=device)
-
-    geo_exemplar_path = output_dir / f"{_GEOMETRY_ENCODER_EXEMPLAR_NAME}.onnx"
-    torch.onnx.export(
-        geo_exemplar_wrapper,
-        (dummy_fpn, dummy_pos, dummy_boxes_ignore, dummy_box_labels_ignore, dummy_ex_points, dummy_ex_point_labels),
-        str(geo_exemplar_path),
-        opset_version=opset_version,
-        dynamo=False,
-        input_names=[
-            "fpn_feat_2",
-            "fpn_pos_2",
-            "input_boxes",
-            "input_boxes_labels",
-            "input_points",
-            "input_points_labels",
-        ],
-        output_names=["geometry_features", "geometry_mask"],
-        dynamic_axes={
-            "input_boxes": {0: "batch", 1: "num_boxes"},
-            "input_boxes_labels": {0: "batch", 1: "num_boxes"},
-            "input_points": {0: "batch", 1: "num_points"},
-            "input_points_labels": {0: "batch", 1: "num_points"},
-        },
-    )
-    exported[_GEOMETRY_ENCODER_EXEMPLAR_NAME] = geo_exemplar_path
-    logger.info("  -> %s", geo_exemplar_path)
-
-    # 5. Prompt decoder
-    logger.info("Exporting prompt decoder...")
-    decoder_wrapper = OnnxPromptDecoder(model)
-    decoder_wrapper.eval()
-    # FPN feature sizes: 4x -> resolution*4/14, 2x -> resolution*2/14, 1x -> resolution/14
-    feat_4x = feat_size * 4  # 288 for 1008
-    feat_2x = feat_size * 2  # 144 for 1008
-    dummy_f0 = torch.randn(1, 256, feat_4x, feat_4x, device=device)
-    dummy_f1 = torch.randn(1, 256, feat_2x, feat_2x, device=device)
-    dummy_f2 = torch.randn(1, 256, feat_size, feat_size, device=device)
-    dummy_p2 = torch.randn(1, 256, feat_size, feat_size, device=device)
-    # Text-only prompt (32 tokens)
-    dummy_prompt = torch.randn(1, 32, 256, device=device)
-    dummy_pmask = torch.ones(1, 32, dtype=torch.bool, device=device)
-
-    decoder_path = output_dir / f"{_PROMPT_DECODER_NAME}.onnx"
-    torch.onnx.export(
-        decoder_wrapper,
-        (dummy_f0, dummy_f1, dummy_f2, dummy_p2, dummy_prompt, dummy_pmask),
-        str(decoder_path),
-        opset_version=opset_version,
-        dynamo=False,
-        input_names=[
-            "fpn_feat_0",
-            "fpn_feat_1",
-            "fpn_feat_2",
-            "fpn_pos_2",
-            "prompt_features",
-            "prompt_mask",
-        ],
-        output_names=["pred_masks", "pred_boxes", "pred_logits", "presence_logits"],
-        dynamic_axes={
-            "prompt_features": {0: "batch", 1: "prompt_len"},
-            "prompt_mask": {0: "batch", 1: "prompt_len"},
-        },
-    )
-    exported[_PROMPT_DECODER_NAME] = decoder_path
-    logger.info("  -> %s", decoder_path)
-
-    logger.info("ONNX export complete. %d models written to %s", len(exported), output_dir)
-    return exported
-
-
-def convert_onnx_to_openvino(
-    onnx_dir: str | Path,
-    output_dir: str | Path,
-    *,
-    compress_to_fp16: bool = True,
-) -> dict[str, Path]:
-    """Convert all SAM3 ONNX models in a directory to OpenVINO IR.
-
-    Args:
-        onnx_dir: Directory containing the ONNX files.
-        output_dir: Directory to write OpenVINO IR files.
-        compress_to_fp16: Compress weights to FP16 during conversion.
-
-    Returns:
-        Mapping from model name to the written ``.xml`` path.
-    """
-    import openvino as ov  # noqa: PLC0415
-
-    onnx_dir = Path(onnx_dir)
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    model_names = [
-        _VISION_ENCODER_NAME,
-        _TEXT_ENCODER_NAME,
-        _GEOMETRY_ENCODER_NAME,
-        _GEOMETRY_ENCODER_EXEMPLAR_NAME,
-        _PROMPT_DECODER_NAME,
-    ]
-
-    converted: dict[str, Path] = {}
-    for name in model_names:
-        onnx_path = onnx_dir / f"{name}.onnx"
-        if not onnx_path.exists():
-            # Fall back to fp16-suffixed variant (e.g. vision-encoder-fp16.onnx)
-            onnx_path = onnx_dir / f"{name}-fp16.onnx"
-        if not onnx_path.exists():
-            logger.warning("Skipping %s — ONNX file not found.", name)
-            continue
-
-        logger.info("Converting %s to OpenVINO IR...", name)
-        ov_model = ov.convert_model(str(onnx_path))
-        ir_path = output_dir / f"{name}.xml"
-        ov.save_model(ov_model, str(ir_path), compress_to_fp16=compress_to_fp16)
-        converted[name] = ir_path
-        logger.info("  -> %s", ir_path)
-
-    logger.info("OpenVINO conversion complete. %d models written to %s", len(converted), output_dir)
-    return converted
