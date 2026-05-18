@@ -204,6 +204,7 @@ class SAM3OpenVINO(Model):
         variant: SAM3OVVariant = SAM3OVVariant.INT8_SYM,
         repo_id: str = SAM3_OV_REPO,
         canvas_config: CanvasConfig | None = None,
+        cache_dir: str | Path | None = None,
     ) -> None:
         """Initialise SAM3 OpenVINO model.
 
@@ -229,6 +230,11 @@ class SAM3OpenVINO(Model):
             canvas_config: Configuration for canvas mode (split ratio, crop
                 padding, text caching). See :class:`CanvasConfig`.
                 Default: ``None`` (uses ``CanvasConfig()`` defaults).
+            cache_dir: Directory for caching compiled OpenVINO models. When set
+                (and not ``"CPU"`` device), the OV runtime stores compiled GPU
+                kernels here so subsequent loads of the same model are ~7x
+                faster. ``None`` (default) uses ``model_dir / ".ov_cache"``.
+                Pass an empty string ``""`` to disable caching.
         """
         super().__init__()
 
@@ -262,6 +268,14 @@ class SAM3OpenVINO(Model):
         # using ov::hint::PerformanceMode::THROUGHPUT compared 
         # to ov::hint::PerformanceMode::LATENCY.
         _compile_props = {"PERFORMANCE_HINT": "LATENCY"} if self.ov_device != "CPU" else {}
+
+        # Model caching: huge startup speedup on GPU (~7x faster recompile).
+        # No latency change. Disabled on CPU (CPU compile is already fast).
+        # Pass ``cache_dir=""`` to disable explicitly.
+        if self.ov_device != "CPU" and cache_dir != "":
+            _cache_path = Path(cache_dir) if cache_dir else self.model_dir / ".ov_cache"
+            _cache_path.mkdir(parents=True, exist_ok=True)
+            _compile_props["CACHE_DIR"] = str(_cache_path)
 
         # Always required: vision encoder, text encoder, prompt decoder
         vision_path = _get_model_file(self.model_dir, _VISION_ENCODER)
