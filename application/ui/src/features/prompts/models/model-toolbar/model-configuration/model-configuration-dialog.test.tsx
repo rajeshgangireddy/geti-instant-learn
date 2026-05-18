@@ -4,7 +4,7 @@
  */
 
 import { ModelType, ModelUpdateType } from '@/api';
-import { getMockedModel, getMockedYoloeModel, render } from '@/test-utils';
+import { getMockedMatcherModel, getMockedModel, getMockedSam3Model, getMockedYoloeModel, render } from '@/test-utils'; main
 import { fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { HttpResponse } from 'msw';
@@ -43,6 +43,10 @@ class ModelConfigurationDialogPage {
         await this.changeNumberField('Confidence threshold', value);
     }
 
+    async changeResolution(value: number) {
+        await this.changeNumberField('Resolution', value);
+    }
+
     private async changeSelection(field: string, value: string) {
         await userEvent.click(screen.getByRole('button', { name: new RegExp(field) }));
         await userEvent.click(screen.getByRole('option', { name: value }));
@@ -58,6 +62,10 @@ class ModelConfigurationDialogPage {
 
     async changePrecision(value: string) {
         await this.changeSelection('Precision', value);
+    }
+
+    async changeCompressionPreset(value: string) {
+        await this.changeSelection('Compression preset', value);
     }
 
     async configureModel() {
@@ -86,11 +94,8 @@ describe('ModelConfigurationDialog', () => {
     });
 
     it('enables configure button when any of the parameters has been changes', async () => {
-        const mockedModel = getMockedModel();
-
-        const model = getMockedModel({
+        const model = getMockedMatcherModel({
             config: {
-                ...mockedModel.config,
                 model_type: 'matcher',
                 num_foreground_points: 10,
                 num_background_points: 10,
@@ -99,6 +104,8 @@ describe('ModelConfigurationDialog', () => {
                 encoder_model: 'dinov3_small',
                 use_mask_refinement: true,
                 precision: 'bf16',
+                num_grid_cells: 8,
+                preset: 'throughput',
             },
         });
 
@@ -132,6 +139,11 @@ describe('ModelConfigurationDialog', () => {
         await modelConfigurationDialogPage.changePrecision('FP16');
         expect(modelConfigurationDialogPage.configureButton).toBeEnabled();
         await modelConfigurationDialogPage.changePrecision(model.config.precision.toUpperCase());
+        expect(modelConfigurationDialogPage.configureButton).toBeDisabled();
+
+        await modelConfigurationDialogPage.changeCompressionPreset('Accuracy');
+        expect(modelConfigurationDialogPage.configureButton).toBeEnabled();
+        await modelConfigurationDialogPage.changeCompressionPreset('Throughput');
         expect(modelConfigurationDialogPage.configureButton).toBeDisabled();
     });
 
@@ -179,13 +191,76 @@ describe('ModelConfigurationDialog', () => {
                     sam_model: 'SAM2-small',
                     encoder_model: 'dinov3_base',
                     precision: precision.toLowerCase(),
-                    use_nms: model.config.use_nms,
-                    compile_models: model.config.compile_models,
                 })
             );
         });
 
         expect(mockOnClose).toHaveBeenCalled();
+    });
+
+    it('submits preset value in matcher config', async () => {
+        let body: ModelUpdateType;
+        server.use(
+            http.put('/api/v1/projects/{project_id}/models/{model_id}', async ({ request }) => {
+                body = await request.json();
+                return HttpResponse.json(request.body);
+            })
+        );
+
+        const model = getMockedModel({
+            config: {
+                model_type: 'matcher',
+                num_foreground_points: 5,
+                num_background_points: 3,
+                confidence_threshold: 0.75,
+                sam_model: 'SAM-HQ-tiny',
+                encoder_model: 'dinov3_small',
+                use_mask_refinement: false,
+                similarity_threshold: null,
+                num_grid_cells: 8,
+                precision: 'bf16',
+                preset: 'throughput',
+            },
+        });
+
+        const mockOnClose = vi.fn();
+        const { modelConfigurationDialogPage } = renderModelConfigurationDialog({ model, onClose: mockOnClose });
+
+        await modelConfigurationDialogPage.changeCompressionPreset('Accuracy');
+        await modelConfigurationDialogPage.configureModel();
+
+        await waitFor(() => {
+            expect(body.config).toEqual(
+                expect.objectContaining({
+                    model_type: 'matcher',
+                    preset: 'accuracy',
+                })
+            );
+        });
+
+        expect(mockOnClose).toHaveBeenCalled();
+    });
+
+    it('compression preset dropdown is visible for matcher model', () => {
+        const model = getMockedModel({
+            config: {
+                model_type: 'matcher',
+                num_foreground_points: 5,
+                num_background_points: 3,
+                confidence_threshold: 0.75,
+                sam_model: 'SAM-HQ-tiny',
+                encoder_model: 'dinov3_small',
+                use_mask_refinement: false,
+                similarity_threshold: null,
+                num_grid_cells: 8,
+                precision: 'bf16',
+                preset: 'throughput',
+            },
+        });
+
+        renderModelConfigurationDialog({ model });
+
+        expect(screen.getByRole('button', { name: /Compression preset/i })).toBeVisible();
     });
 
     it('closes the dialog', async () => {
@@ -213,5 +288,82 @@ describe('ModelConfigurationDialog', () => {
         const { modelConfigurationDialogPage } = renderModelConfigurationDialog({ model });
 
         expect(modelConfigurationDialogPage.configureButton).toBeDisabled();
+    });
+
+    describe('Sam3Configuration', () => {
+        it('renders SAM3 config fields', () => {
+            const model = getMockedSam3Model();
+            renderModelConfigurationDialog({ model });
+
+            expect(screen.getByRole('textbox', { name: 'Confidence threshold' })).toBeVisible();
+            expect(screen.getByRole('textbox', { name: 'Resolution' })).toBeVisible();
+            expect(screen.getByRole('button', { name: /Precision/ })).toBeVisible();
+
+            // SAM3 should NOT show encoder/decoder model pickers or foreground/background points
+            expect(screen.queryByRole('button', { name: /Encoder model/ })).not.toBeInTheDocument();
+            expect(screen.queryByRole('button', { name: /Decoder model/ })).not.toBeInTheDocument();
+            expect(screen.queryByRole('textbox', { name: 'Number of foreground points' })).not.toBeInTheDocument();
+            expect(screen.queryByRole('textbox', { name: 'Number of background points' })).not.toBeInTheDocument();
+        });
+
+        it('disables configure button when SAM3 parameters have not been changed', () => {
+            const model = getMockedSam3Model();
+            const { modelConfigurationDialogPage } = renderModelConfigurationDialog({ model });
+
+            expect(modelConfigurationDialogPage.configureButton).toBeDisabled();
+        });
+
+        it('enables configure button when SAM3 confidence threshold is changed', async () => {
+            const model = getMockedSam3Model();
+            const { modelConfigurationDialogPage } = renderModelConfigurationDialog({ model });
+
+            await modelConfigurationDialogPage.changeConfidenceThreshold(0.8);
+            expect(modelConfigurationDialogPage.configureButton).toBeEnabled();
+
+            await modelConfigurationDialogPage.changeConfidenceThreshold(model.config.confidence_threshold);
+            expect(modelConfigurationDialogPage.configureButton).toBeDisabled();
+        });
+
+        it('enables configure button when SAM3 resolution is changed', async () => {
+            const model = getMockedSam3Model();
+            const { modelConfigurationDialogPage } = renderModelConfigurationDialog({ model });
+
+            await modelConfigurationDialogPage.changeResolution(512);
+            expect(modelConfigurationDialogPage.configureButton).toBeEnabled();
+        });
+
+        it('configures SAM3 model', async () => {
+            let body: ModelUpdateType;
+            server.use(
+                http.put('/api/v1/projects/{project_id}/models/{model_id}', async ({ request }) => {
+                    body = await request.json();
+                    return HttpResponse.json(request.body);
+                })
+            );
+
+            const model = getMockedSam3Model({ active: true });
+            const mockOnClose = vi.fn();
+            const { modelConfigurationDialogPage } = renderModelConfigurationDialog({
+                model,
+                onClose: mockOnClose,
+            });
+
+            await modelConfigurationDialogPage.changeConfidenceThreshold(0.7);
+            await modelConfigurationDialogPage.changeResolution(512);
+            await modelConfigurationDialogPage.changePrecision('BF16');
+
+            await modelConfigurationDialogPage.configureModel();
+
+            await waitFor(() => {
+                expect(body.config).toEqual({
+                    model_type: 'sam3',
+                    confidence_threshold: 0.7,
+                    resolution: 512,
+                    precision: 'bf16',
+                });
+            });
+
+            expect(mockOnClose).toHaveBeenCalled();
+        });
     });
 });

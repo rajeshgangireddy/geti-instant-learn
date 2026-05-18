@@ -7,8 +7,7 @@ from threading import Event
 from types import TracebackType
 from typing import Any, TypeVar
 
-import torch
-from instantlearn.data.base.batch import Batch
+import numpy as np
 
 from domain.services.schemas.processor import InputData
 from domain.services.schemas.reader import FrameListResponse, ReaderConfig
@@ -78,6 +77,17 @@ class StreamReader(AbstractContextManager, ABC):
             - The Source should loop continuously (e.g. for video/camera)
         """
         return False
+
+    def validate_config(self) -> None:
+        """Validate the reader configuration.
+
+        Called before activating a source to ensure the configuration is valid.
+        Default implementation does nothing. Readers should override this to
+        implement their own validation logic.
+
+        Raises:
+            ValueError: If the configuration is invalid.
+        """
 
     def connect(self) -> None:
         pass
@@ -152,5 +162,8 @@ class ModelHandler(ABC):
         pass
 
     @abstractmethod
-    def predict(self, batch: Batch) -> list[dict[str, torch.Tensor]]:
+    def predict(self, inputs: list[InputData]) -> list[dict[str, np.ndarray]]:
         pass
+
+    def close(self) -> None:
+        """Release underlying resources (e.g. models from GPU memory)."""

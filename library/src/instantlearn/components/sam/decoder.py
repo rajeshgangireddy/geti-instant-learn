@@ -6,13 +6,17 @@
 import torch
 from torch import nn
 from torch.nn import functional
-from torchvision.ops import nms
 
 from instantlearn.components.sam.predictor import SAMPredictor
+from instantlearn.utils.image_resize import downscale_image, upscale_masks
 
 
 def masks_to_boxes_traceable(masks: torch.Tensor) -> torch.Tensor:
     """Traceable version of masks_to_boxes that works with ONNX export.
+
+    Projects masks onto row/column axes first, then finds min/max coordinates
+    on 1D vectors. This avoids materializing NxHxW coordinate grids, reducing
+    intermediate memory from O(N*H*W) to O(N*H + N*W).
 
     Args:
         masks: Tensor[N, H, W] - binary masks
@@ -20,33 +24,30 @@ def masks_to_boxes_traceable(masks: torch.Tensor) -> torch.Tensor:
     Returns:
         Tensor[N, 4] - bounding boxes in (x1, y1, x2, y2) format
     """
-    # Handle empty masks by clamping to at least 1 element to avoid conditionals
-    # The caller should check for empty masks separately
-    n = masks.size(0)
     h = masks.size(1)
     w = masks.size(2)
 
-    # Create coordinate grids [N, H, W]
-    y_coords = torch.arange(h, device=masks.device, dtype=torch.float).view(1, h, 1).expand(n, h, w)
-    x_coords = torch.arange(w, device=masks.device, dtype=torch.float).view(1, 1, w).expand(n, h, w)
+    # Project masks onto axes: [N, H, W] -> [N, W] and [N, H]
+    # This collapses one spatial dimension first, so subsequent ops are cheap.
+    any_per_col = masks.any(dim=1)  # [N, W] -- True if column has any mask pixel
+    any_per_row = masks.any(dim=2)  # [N, H] -- True if row has any mask pixel
 
-    # Boolean mask
-    mask_bool = masks.bool()
+    # 1D coordinate vectors (NOT expanded to NxHxW)
+    x_coords = torch.arange(w, device=masks.device, dtype=torch.float)  # [W]
+    y_coords = torch.arange(h, device=masks.device, dtype=torch.float)  # [H]
 
-    # Use large/small sentinel values for min/max reduction
     large_val = torch.tensor(max(h, w) + 1, dtype=torch.float, device=masks.device)
 
-    # For min: non-mask pixels get large value, for max: get -1
-    x_for_min = torch.where(mask_bool, x_coords, large_val)
-    x_for_max = torch.where(mask_bool, x_coords, -1.0)
-    y_for_min = torch.where(mask_bool, y_coords, large_val)
-    y_for_max = torch.where(mask_bool, y_coords, -1.0)
+    # Sentinel-based min/max on projected 1D vectors: [N, W] and [N, H]
+    x_for_min = torch.where(any_per_col, x_coords.unsqueeze(0), large_val)  # [N, W]
+    x_for_max = torch.where(any_per_col, x_coords.unsqueeze(0), -1.0)  # [N, W]
+    y_for_min = torch.where(any_per_row, y_coords.unsqueeze(0), large_val)  # [N, H]
+    y_for_max = torch.where(any_per_row, y_coords.unsqueeze(0), -1.0)  # [N, H]
 
-    # Flatten spatial dims and reduce
-    x1 = x_for_min.flatten(1).min(dim=1).values
-    y1 = y_for_min.flatten(1).min(dim=1).values
-    x2 = x_for_max.flatten(1).max(dim=1).values
-    y2 = y_for_max.flatten(1).max(dim=1).values
+    x1 = x_for_min.min(dim=1).values
+    y1 = y_for_min.min(dim=1).values
+    x2 = x_for_max.max(dim=1).values
+    y2 = y_for_max.max(dim=1).values
 
     return torch.stack([x1, y1, x2, y2], dim=1)
 
@@ -59,38 +60,34 @@ class SamDecoder(nn.Module):
 
     Args:
         sam_predictor: PyTorch SAM predictor instance.
-        target_length: Target length for image preprocessing. Default: 1024.
         confidence_threshold: Minimum confidence score for keeping predicted masks
-        in the final output. Higher values = stricter filtering. Default: 0.38.
-        nms_iou_threshold: IoU threshold for NMS. Default: 0.1.
-        max_masks_per_category: Maximum masks to return per category (for padding). Default: 10.
+            in the final output. Higher values = stricter filtering. Default: 0.38.
+        max_masks_per_category: Maximum masks to return per category (for padding). Default: 40.
         use_mask_refinement: Whether to use 2-stage mask refinement with box prompts. Default: False.
-        merge_masks_per_class: Whether to merge all masks into single mask per class. Default: True.
-        use_nms: Whether to use NMS when predicting masks. Default: True.
+        max_image_side: Maximum image side length for SAM processing. Images larger than
+            this are downscaled (preserving aspect ratio) before SAM, then masks are
+            upscaled back. SAM works internally at 1024x1024, so larger images just
+            increase mask memory without improving quality. Default: 1024.
     """
 
     def __init__(
         self,
         sam_predictor: SAMPredictor,
         confidence_threshold: float = 0.38,
-        nms_iou_threshold: float = 0.1,
         max_masks_per_category: int = 40,
         use_mask_refinement: bool = False,
-        merge_masks_per_class: bool = True,
-        use_nms: bool = True,
+        max_image_side: int = 1024,
     ) -> None:
         """Initialize the traceable SAM decoder."""
         super().__init__()
         self.predictor = sam_predictor
         self.confidence_threshold = confidence_threshold
-        self.nms_iou_threshold = nms_iou_threshold
         self.max_masks_per_category = max_masks_per_category
         self.use_mask_refinement = use_mask_refinement
-        self.merge_masks_per_class = merge_masks_per_class
-        self.use_nms = use_nms
+        self.max_image_side = max_image_side
         self.device = sam_predictor.device
 
-    def _preprocess_points(self, points: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _preprocess_points(self, points: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:  # noqa: PLR6301
         """Preprocess points for SAM predictor.
 
         Args:
@@ -99,6 +96,22 @@ class SamDecoder(nn.Module):
         Returns:
             Tuple of (point_coords, point_labels, original_points)
         """
+        if torch.onnx.is_in_onnx_export():
+            # Keep export shapes stable: pass a single fixed-size prompt set [1, max_points, ...]
+            # and convert padding label 0 -> -1 so SAM treats padded slots as not-a-point.
+            point_coords = points[:, :2].unsqueeze(0)
+            point_labels = (
+                torch.where(
+                    points[:, 3] == 0,
+                    torch.full_like(points[:, 3], -1),
+                    points[:, 3],
+                )
+                .to(torch.float32)
+                .unsqueeze(0)
+            )
+            original_points = points
+            return point_coords, point_labels, original_points
+
         valid_points = points[points[:, 3] != 0]
 
         # Check if there are any foreground points (label == 1)
@@ -152,20 +165,25 @@ class SamDecoder(nn.Module):
             original_size: Original image size (H, W)
 
         Returns:
-            Padded masks [max_masks, H, W], scores [max_masks], labels [max_masks]
+            Padded masks [max_masks, H, W] (float32 for ONNX tracing
+            compatibility), scores [max_masks], labels [max_masks]
         """
-        device = self.device
+        device = masks.device
         h, w = original_size
 
         num_masks = masks.size(0)
         max_masks = self.max_masks_per_category
 
-        padded_masks = torch.zeros(max_masks, h, w, device=device, dtype=torch.bool)
+        padded_masks = torch.zeros(max_masks, h, w, device=device, dtype=torch.float32)
         padded_scores = torch.zeros(max_masks, device=device, dtype=torch.float32)
         padded_labels = torch.full((max_masks,), -1, device=device, dtype=torch.int64)
 
         if torch.onnx.is_in_onnx_export():
-            n = torch.minimum(num_masks, torch.tensor(max_masks))
+            # Keep scalar tensors on the same device to avoid CPU/XPU mixed-index ops during tracing.
+            n = torch.minimum(
+                torch.scalar_tensor(num_masks, dtype=torch.long, device=device),
+                torch.scalar_tensor(max_masks, dtype=torch.long, device=device),
+            )
         else:
             n = min(num_masks, max_masks)
         padded_masks[:n] = masks[:n]
@@ -174,7 +192,7 @@ class SamDecoder(nn.Module):
 
         return padded_masks, padded_scores, padded_labels
 
-    def _resize_similarity(
+    def _resize_similarity(  # noqa: PLR6301
         self,
         similarity: torch.Tensor,
         target_size: tuple[int, int],
@@ -191,6 +209,56 @@ class SamDecoder(nn.Module):
         sim = similarity.unsqueeze(0).unsqueeze(0)
         sim_resized = functional.interpolate(sim, size=target_size, mode="bilinear", align_corners=False)
         return sim_resized[0]
+
+    def _predict_masks_for_category_export(
+        self,
+        point_coords: torch.Tensor,
+        point_labels: torch.Tensor,
+        similarity: torch.Tensor,
+        original_size: tuple[int, int],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Export-safe prediction: no data-dependent control flow, no NMS.
+
+        All foreground points are merged into a single prompt set [1, max_points, 2].
+        SAM returns 3 candidate masks (multimask_output=True); we keep only the
+        best one by IoU score, producing exactly 1 mask per category.
+
+        This means the export graph is **semantic-only** — it cannot represent
+        multiple instances of the same category.  The PyTorch runtime path
+        (`_predict_masks_for_category`) does not have this limitation.
+
+        Scoring uses similarity weighting; thresholding is deferred to
+        post-processing.
+
+        TODO(export): Return all 3 SAM masks per category [C, 3, H, W] to allow
+        the host-side post-processor to recover up to 3 instances per class.
+        For more instances, individual foreground points would need separate SAM
+        calls (K x C passes), which is slower.
+        """
+        masks, iou_preds, _ = self.predictor.forward(
+            point_coords=point_coords,
+            point_labels=point_labels,
+            boxes=None,
+            mask_input=None,
+            multimask_output=True,
+            return_logits=True,
+        )
+
+        # Select best mask by IoU prediction (more robust than fixed index 0,
+        # since GPU noise could reorder the 3 multimask outputs).
+        best_idx = iou_preds[:, :3].argmax(dim=1)  # [1]
+        masks = masks[torch.arange(masks.size(0), device=masks.device), best_idx]  # [1, H, W]
+        masks = (masks > 0).to(masks.dtype)
+        mask_weights = iou_preds[torch.arange(iou_preds.size(0), device=iou_preds.device), best_idx]  # [1]
+
+        # Similarity-based scoring
+        sim_resized = self._resize_similarity(similarity, original_size)
+        mask_sum = (sim_resized * masks).sum(dim=(1, 2))
+        mask_area = masks.sum(dim=(1, 2)) + 1e-6
+        mask_scores = mask_sum / mask_area
+        weighted_scores = mask_scores * mask_weights
+
+        return masks, weighted_scores
 
     def _predict_masks_for_category(
         self,
@@ -210,6 +278,14 @@ class SamDecoder(nn.Module):
         Returns:
             Tuple of (masks [N, H, W], scores [N])
         """
+        if torch.onnx.is_in_onnx_export():
+            return self._predict_masks_for_category_export(
+                point_coords,
+                point_labels,
+                similarity,
+                original_size,
+            )
+
         # Initial prediction
         # masks: [num_fg, 1, H, W], iou_preds: [num_fg, 1]
         masks, iou_preds, low_res_logits = self.predictor.forward(
@@ -235,8 +311,6 @@ class SamDecoder(nn.Module):
         point_labels = point_labels[keep]
 
         # Compute boxes from masks for NMS (and optionally for 2nd SAM prediction)
-        # The masks are in original image coordinates, so boxes are too.
-        # The predictor will handle coordinate transformation internally.
         boxes = masks_to_boxes_traceable(masks)
         boxes = boxes.unsqueeze(1)
 
@@ -247,50 +321,25 @@ class SamDecoder(nn.Module):
                 point_labels=point_labels,
                 boxes=boxes,
                 mask_input=low_res_logits,
-                multimask_output=True,  # Match SamDecoder behavior
+                multimask_output=True,
             )
             masks = masks[:, 0, :, :]  # [N, H, W]
         else:
             mask_weights = iou_preds[keep]
 
-        # NMS - NOTE: torchvision NMS requires float32 inputs
-        if self.use_nms:
-            nms_indices = nms(
-                boxes[:, 0, :].to(torch.float32),
-                mask_weights[:, 0].to(torch.float32),
-                iou_threshold=self.nms_iou_threshold,
-            )
-            masks = masks[nms_indices]
-            mask_weights = mask_weights[nms_indices]
-
-        # Similarity-based scoring - always compute
+        # Similarity-based scoring
         sim_resized = self._resize_similarity(similarity, original_size)
         mask_sum = (sim_resized * masks).sum(dim=(1, 2))
-        mask_area = masks.sum(dim=(1, 2)) + 1e-6  # Avoid div by zero
+        mask_area = masks.sum(dim=(1, 2)) + 1e-6
         mask_scores = mask_sum / mask_area
         weighted_scores = (mask_scores * mask_weights.T)[0, :]
 
-        # Apply threshold via masking, NOT early return
+        # Apply threshold via masking
         keep = weighted_scores > self.confidence_threshold
-
-        # Zero out scores for filtered masks instead of removing them
         weighted_scores = torch.where(keep, weighted_scores, torch.zeros_like(weighted_scores))
 
-        # For merge: compute merged result (handles empty case gracefully)
-        if self.merge_masks_per_class:
-            # Mask out filtered masks before merging
-            valid_masks = masks * keep.unsqueeze(-1).unsqueeze(-1)
-            merged_mask = (valid_masks.sum(0) > 0).unsqueeze(0)  # [1, H, W]
-
-            # For max score, use -inf for invalid to ensure they're not selected
-            scores_for_max = torch.where(keep, weighted_scores, torch.full_like(weighted_scores, -float("inf")))
-            merged_score = scores_for_max.max().unsqueeze(0)
-            # If all filtered out, score becomes -inf, clamp to 0
-            merged_score = torch.clamp(merged_score, min=0.0)
-            return merged_mask, merged_score
-
-        # For non-merge case: return with validity mask
-        # Caller should filter by scores > 0
+        # Return per-instance masks and scores
+        # Any post-processing like NMS or per-class merging is handled at the model level.
         return masks, weighted_scores
 
     def _process_single_image_with_points(
@@ -309,19 +358,41 @@ class SamDecoder(nn.Module):
             category_ids: Category ID mapping [C]
 
         Returns:
-            pred_masks: [num_valid_masks, H, W]
+            pred_masks: [num_valid_masks, orig_H, orig_W]
             pred_scores: [num_valid_masks]
             pred_labels: [num_valid_masks]
-            pred_points: [num_points_used, 4]
+            pred_points: [num_points_used, 4] (in original image coordinates)
         """
-        h, w = image.size(1), image.size(2)
-        orig_size = (h, w)
+        orig_h, orig_w = image.size(1), image.size(2)
+        orig_size = (orig_h, orig_w)
+
+        # Downscale large images to limit GPU memory.
+        # SAM internally encodes at 1024x1024 so larger output masks just
+        # upsample SAM's 256x256 logits without improving quality.
+        downscaled = downscale_image(image, self.max_image_side)
+        image = downscaled.image
+        scale = downscaled.scale
+
+        if downscaled.is_scaled:
+            point_prompts = point_prompts.clone()
+            point_prompts[..., 0] *= scale  # x
+            point_prompts[..., 1] *= scale  # y
+
+        work_h, work_w = image.size(1), image.size(2)
+        work_size = (work_h, work_w)
         self.predictor.set_image(image)
 
-        num_categories = len(category_ids)
+        num_categories = category_ids.shape[0] if hasattr(category_ids, "shape") else len(category_ids)
         device = self.device
 
-        all_masks = torch.zeros(num_categories, self.max_masks_per_category, h, w, device=device)
+        all_masks = torch.zeros(
+            num_categories,
+            self.max_masks_per_category,
+            work_h,
+            work_w,
+            device=device,
+            dtype=torch.bool,
+        )
         all_scores = torch.zeros(num_categories, self.max_masks_per_category, device=device)
         all_labels = torch.full((num_categories, self.max_masks_per_category), -1, device=device, dtype=torch.int64)
         used_points_list: list[torch.Tensor] = []
@@ -336,14 +407,14 @@ class SamDecoder(nn.Module):
                 point_coords,
                 point_labels,
                 similarity,
-                orig_size,
+                work_size,
             )
 
             padded_masks, padded_scores, padded_labels = self._pad_outputs(
                 masks,
                 scores,
                 class_id,
-                orig_size,
+                work_size,
             )
 
             all_masks[class_idx] = padded_masks
@@ -357,10 +428,19 @@ class SamDecoder(nn.Module):
 
         # Flatten and filter valid predictions
         valid_mask = all_labels >= 0
-        pred_masks = all_masks.bool()[valid_mask]
+        # Select on float tensor first; convert to bool after indexing to avoid u8 GatherND in export graphs.
+        pred_masks = all_masks[valid_mask] > 0
         pred_scores = all_scores[valid_mask]
         pred_labels = all_labels[valid_mask]
         pred_points = torch.cat(used_points_list, dim=0)
+
+        # Upscale masks and points back to original resolution
+        if downscaled.is_scaled:
+            pred_masks = upscale_masks(pred_masks, orig_size)
+            if pred_points.numel() > 0:
+                pred_points = pred_points.clone()
+                pred_points[:, 0] /= scale  # x
+                pred_points[:, 1] /= scale  # y
 
         return pred_masks, pred_scores, pred_labels, pred_points
 
@@ -375,7 +455,6 @@ class SamDecoder(nn.Module):
         Args:
             image: Input image [3, H, W]
             box_prompts: Box prompts [C, max_boxes, 5] with (x1, y1, x2, y2, score)
-            num_boxes: Number of valid boxes per category [C]
             category_ids: Category ID mapping [C]
 
         Returns:
@@ -473,9 +552,6 @@ class SamDecoder(nn.Module):
             box_prompts: Box prompts [T, C, max_boxes, 5] (optional)
             similarities: Similarity maps [T, C, feat_size, feat_size] (optional)
 
-        Raises:
-            ValueError: If both or neither of point_prompts and box_prompts are provided.
-
         Returns:
             List of predictions per image, each containing:
                 "pred_masks": [num_valid_masks, H, W]
@@ -483,6 +559,9 @@ class SamDecoder(nn.Module):
                 "pred_labels": [num_valid_masks]
                 "pred_points": [num_points_used, 4] (point mode only)
                 "pred_boxes": [num_boxes, 5] (box mode only)
+
+        Raises:
+            ValueError: If both or neither of point_prompts and box_prompts are provided.
         """
         use_points = point_prompts is not None
         use_boxes = box_prompts is not None
@@ -532,8 +611,15 @@ class SamDecoder(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Export-friendly forward for single image returning flat tensors.
 
-        This method is designed for ONNX/TorchScript export where outputs
-        must be tensors (not list[dict]).
+        Produces fixed-size output [C, H, W] — exactly 1 mask per category
+        (semantic segmentation).  Instance segmentation is not supported in the
+        export path because the ONNX graph requires static output shapes and
+        cannot represent a variable number of instances.
+
+        The host-side ``PostProcessor`` can recover limited instance information
+        via connected-component analysis on the per-category masks.
+
+        No data-dependent control flow, no NMS, no dynamic filtering.
 
         Args:
             image: Single input image [3, H, W]
@@ -543,14 +629,33 @@ class SamDecoder(nn.Module):
 
         Returns:
             Tuple of:
-                masks: [num_valid_masks, H, W]
-                scores: [num_valid_masks]
-                labels: [num_valid_masks]
+                masks: [C, H, W] - float masks (1 per category)
+                scores: [C] - similarity-weighted confidence scores
+                labels: [C] - category IDs
         """
-        masks, scores, labels, _ = self._process_single_image_with_points(
-            image,
-            point_prompts,
-            similarities,
-            category_ids,
-        )
-        return masks, scores, labels
+        h, w = image.size(1), image.size(2)
+        orig_size = (h, w)
+        self.predictor.set_image(image)
+
+        num_categories = category_ids.shape[0]
+        device = image.device
+
+        all_masks = torch.zeros(num_categories, h, w, device=device)
+        all_scores = torch.zeros(num_categories, device=device)
+
+        for class_idx in range(num_categories):
+            points = point_prompts[class_idx]
+            similarity = similarities[class_idx]
+
+            point_coords, point_labels, _ = self._preprocess_points(points)
+            mask, score = self._predict_masks_for_category_export(
+                point_coords,
+                point_labels,
+                similarity,
+                orig_size,
+            )
+
+            all_masks[class_idx] = mask[0]
+            all_scores[class_idx] = score[0]
+
+        return all_masks, all_scores, category_ids

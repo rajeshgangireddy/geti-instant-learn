@@ -1,16 +1,38 @@
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 
 from domain.services.schemas.base import Pagination
+from domain.services.schemas.processor import ErrorData, InputData
 from runtime.core.components.base import StreamReader
 from runtime.core.components.broadcaster import FrameBroadcaster
 from runtime.core.components.source import Source
 
+
+def make_input(name: str) -> InputData:
+    return InputData(timestamp=0, frame=np.zeros((2, 2, 3), dtype=np.uint8), context={"name": name})
+
+
+def happy_path():
+    f1, f2, f3 = make_input("frame1"), make_input("frame2"), make_input("frame3")
+    return [f1, f2, f3], [f1, f2, f3]
+
+
+def handles_nones():
+    f1, f2, f3 = make_input("frame1"), make_input("frame2"), make_input("frame3")
+    return [None, f1, None, f2, f3, None], [f1, f2, f3]
+
+
+def broadcasts_all():
+    f1, f2, f3, f4 = make_input("frame1"), make_input("frame2"), make_input("frame3"), make_input("frame4")
+    return [f1, f2, f3, f4], [f1, f2, f3, f4]
+
+
 test_cases = [
-    ("happy_path", ["frame1", "frame2", "frame3"], ["frame1", "frame2", "frame3"]),
-    ("handles_nones", [None, "frame1", None, "frame2", "frame3", None], ["frame1", "frame2", "frame3"]),
-    ("broadcasts_all_frames", ["frame1", "frame2", "frame3", "frame4"], ["frame1", "frame2", "frame3", "frame4"]),
+    ("happy_path", happy_path),
+    ("handles_nones", handles_nones),
+    ("broadcasts_all_frames", broadcasts_all),
 ]
 
 
@@ -22,10 +44,9 @@ class TestSource:
         self.source = Source(self.mock_stream_reader)
         self.source.setup(self.mock_broadcaster)
 
-    @pytest.mark.parametrize(
-        "test_id, input_data, expected_broadcasts", test_cases, ids=[case[0] for case in test_cases]
-    )
-    def test_source_run_logic(self, test_id, input_data, expected_broadcasts):
+    @pytest.mark.parametrize("test_id, data_factory", test_cases, ids=[case[0] for case in test_cases])
+    def test_source_run_logic(self, test_id, data_factory):
+        input_data, expected_broadcasts = data_factory()
         iterator = iter(input_data)
 
         def read_and_then_stop(*args, **kwargs):
@@ -42,7 +63,10 @@ class TestSource:
         assert self.mock_stream_reader.close.call_count == 2
 
         broadcast_calls = [call.args[0] for call in self.mock_broadcaster.broadcast.call_args_list]
-        assert broadcast_calls == expected_broadcasts
+        assert len(broadcast_calls) == len(expected_broadcasts)
+        for actual, expected in zip(broadcast_calls, expected_broadcasts):
+            assert actual is expected
+            assert actual.trace is not None
 
     def test_seek_delegates_to_reader(self):
         self.source.seek(42)
@@ -87,3 +111,27 @@ class TestSource:
 
         self.source.run()
         self.mock_stream_reader.connect.assert_called_once()
+
+    def test_source_connect_error_sets_slot_error(self):
+        """Test that Source broadcasts ErrorData when connect fails."""
+        self.mock_stream_reader.connect.side_effect = RuntimeError("File not found")
+
+        self.source.run()
+
+        self.mock_broadcaster.broadcast.assert_called_once()
+        error_data = self.mock_broadcaster.broadcast.call_args[0][0]
+        assert isinstance(error_data, ErrorData)
+        assert "File not found" in error_data.message
+
+    def test_source_connect_error_terminates_gracefully(self):
+        """Test that Source thread terminates gracefully when connect fails."""
+        self.mock_stream_reader.connect.side_effect = RuntimeError("Connection error")
+
+        from threading import Thread
+
+        thread = Thread(target=self.source.run, daemon=True)
+        thread.start()
+        thread.join(timeout=2)
+
+        assert not thread.is_alive()
+        self.mock_stream_reader.read.assert_not_called()

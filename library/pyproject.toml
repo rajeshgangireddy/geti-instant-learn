@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "instantlearn"
-version = "0.1.0"
+dynamic = ["version"]
 authors = [{ name = "Geti Instant Learn Contributors" }]
 description = "Geti Instant Learn - A modular framework for visual prompting"
 readme = "README.md"
@@ -25,7 +25,7 @@ dependencies = [
     "numpy~=2.2.6",
     "opencv-python~=4.13.0",
     "rich==14.0.0",
-    "requests==2.32.4",
+    "requests==2.33.0",
     "pycocotools==2.0.11",
     "scipy==1.15.3",
     "pot==0.9.6",
@@ -42,12 +42,16 @@ dependencies = [
     "ftfy",
     "torchmetrics==1.8.2",
     "openvino==2025.3.0",
+    "nncf>=2.16.0",
     "onnx>=1.19.1",
     "onnxruntime>=1.23.2",
     # ONNXScript is used for authoring and transforming ONNX graphs in
     # Instant Learn's ONNX-based model export and optimization utilities.
     "onnxscript>=0.6.0",
     "ultralytics>=8.3.0",
+    # huggingface_hub is required for auto-downloading pre-exported SAM3
+    # OpenVINO models from HuggingFace Hub.
+    "huggingface_hub>=0.25.0",
 ]
 
 [dependency-groups]
@@ -85,6 +89,9 @@ notebook = [
     "jupyter==1.1.1",
     "ipykernel==6.30.1",
 ]
+demo = [
+    "gradio>=4.0",
+]
 dev = [
     "ruff==0.11.12",
     "pre-commit==4.2.0",
@@ -102,7 +109,7 @@ docs = [
 ]
 
 full = [
-    "instantlearn[dev, notebook]",
+    "instantlearn[dev, notebook, demo]",
 ]
 
 [project.scripts]
@@ -111,9 +118,13 @@ instantlearn = "instantlearn.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/instantlearn"]
 
+[tool.setuptools.dynamic]
+version = { file = ["VERSION"] }
+
 [tool.uv]
 package = true
 managed = true
+required-version = "~=0.10.0"
 conflicts = [
     [
         { extra = "cpu" },
@@ -135,6 +146,12 @@ explicit = true
 [[tool.uv.index]]
 name = "torch-xpu"
 url = "https://download.pytorch.org/whl/xpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "testpypi"
+url = "https://test.pypi.org/simple/"
+publish-url = "https://test.pypi.org/legacy/"
 explicit = true
 
 [tool.uv.sources]
@@ -227,6 +244,21 @@ notice-rgx = '# Copyright \(C\) (\d{4}(-\d{4})?) Intel Corporation\r?\n# SPDX-Li
 "tests/**/*.py" = [
     "PLR6301",  # Ignore no-self-use for test methods
     "S101",     # Use of assert detected
+]
+"scripts/**/*.py" = [
+    "INP001",   # Scripts are standalone, not packages
+]
+"examples/**/*.py" = [
+    "INP001",   # Examples are standalone, not packages
+]
+"tools/**/*.py" = [
+    "T201",     # print() is intentional for CLI output
+    "PLR0915",  # Too many statements — expected in benchmark scripts
+    "G004",     # Logging f-strings acceptable in standalone dev tools
+]
+"examples/**/*.ipynb" = [
+    "T201",     # print() is the standard output mechanism in notebooks
+    "N812",     # Allow conventional aliases like `import torch.nn.functional as F`
 ]
 
 

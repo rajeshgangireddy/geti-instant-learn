@@ -1,7 +1,7 @@
 ##################
 # Geti UI packages
 ##################
-FROM node:24-alpine3.22@sha256:bb089be859f2741e5ede9d85f47dc7daca754015b50e9642a7a45c5252807d2c AS geti-ui-packages
+FROM node:24-alpine3.22@sha256:b689d4005875ae167178471a7a622ec2909459a3bbb32277260be1971af7a99f AS geti-ui-packages
 
 WORKDIR /home/app/web_ui/
 RUN apk add --no-cache git=2.49.1-r0
@@ -11,7 +11,7 @@ RUN npm run clone-geti-ui-packages
 #############
 # Web UI deps
 #############
-FROM node:24-alpine3.22@sha256:bb089be859f2741e5ede9d85f47dc7daca754015b50e9642a7a45c5252807d2c AS web-ui-base
+FROM node:24-alpine3.22@sha256:b689d4005875ae167178471a7a622ec2909459a3bbb32277260be1971af7a99f AS web-ui-base
 
 WORKDIR /home/app/web_ui/
 
@@ -37,9 +37,11 @@ RUN npm run build
 ##########################################
 # Base for CPU, GPU and XPU runtime images
 ##########################################
-FROM python:3.13-slim@sha256:3de9a8d7aedbb7984dc18f2dff178a7850f16c1ae7c34ba9d7ecc23d0755e35f AS runtime-base
+FROM python:3.13-slim@sha256:dc1546eefcbe8caaa1f004f16ab76b204b5e1dbd58ff81b899f21cd40541232f AS runtime-base
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_LINK_MODE=copy
+# If not limited, uv will use all cores (more than 100 for servers), resulting in No file descriptors available error
+ENV UV_CONCURRENT_INSTALLS=10
 # Disable Python downloads, because we want to use the system interpreter
 ENV UV_PYTHON_DOWNLOADS=0
 
@@ -83,7 +85,7 @@ RUN useradd -l -u ${UID} ${USER_NAME} \
 RUN mkdir -p /instant_learn/app/backend
 WORKDIR /instant_learn/app/backend
 
-# Add sample dataset with coffee berries
+# Add sample datasets
 COPY --link --chown=${UID} ${SOURCE_DATASET_DIR} ${TARGET_DATASET_DIR}
 
 # Copy library and create proper directory structure
@@ -254,21 +256,21 @@ RUN echo "deb [arch=amd64 trusted=yes] https://ppa.launchpadcontent.net/kobuk-te
 # hadolint ignore=DL3008
 RUN apt-get update  \
     && apt-get install -y --no-install-recommends \
-    libze-intel-gpu1=26.01.36711.4-1~24.04~ppa1 \
-    libze1=1.26.2-1~24.04~ppa1 \
-    libze-dev=1.26.2-1~24.04~ppa1 \
-    intel-metrics-discovery=1.14.183-1~24.04~ppa1 \
-    intel-opencl-icd=26.01.36711.4-1~24.04~ppa1 \
-    clinfo=3.0.25.02.14-1 \
-    intel-gsc=0.9.5-1~24.04~ppa2 \
-    intel-ocloc=26.01.36711.4-1~24.04~ppa1 \
-    intel-media-va-driver-non-free=25.4.6-1~24.04~ppa1 \
-    libmfx-gen1=25.4.0-0ubuntu1~24.04~ppa1 \
-    libvpl2=1:2.16.0-1~24.04~ppa1 \
-    libvpl-tools=1.5.0-1~24.04~ppa1 \
-    libva-glx2=2.22.0-3 \
-    va-driver-all=2.22.0-3 \
-    vainfo=2.22.0+ds1-2 \
+    libze-intel-gpu1 \
+    libze1 \
+    libze-dev \
+    intel-metrics-discovery \
+    intel-opencl-icd \
+    clinfo \
+    intel-gsc \
+    intel-ocloc \
+    intel-media-va-driver-non-free \
+    libmfx-gen1 \
+    libvpl2 \
+    libvpl-tools \
+    libva-glx2 \
+    va-driver-all \
+    vainfo \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 

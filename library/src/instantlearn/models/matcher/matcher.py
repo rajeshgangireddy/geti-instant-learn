@@ -3,28 +3,34 @@
 
 """Matcher model, based on the paper 'Segment Anything with One Shot Using All-Purpose Feature Matching'."""
 
+import logging
 from pathlib import Path
 
+import cv2
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional
 
 from instantlearn.components.encoders import ImageEncoder
 from instantlearn.components.feature_extractors import MaskedFeatureExtractor, ReferenceFeatures
+from instantlearn.components.postprocessing import (
+    PostProcessor,
+    default_postprocessor,
+)
 from instantlearn.components.sam import SamDecoder, load_sam_model
 from instantlearn.data.base.batch import Batch, Collatable
 from instantlearn.data.base.sample import Sample
 from instantlearn.models.base import Model
-from instantlearn.utils.constants import Backend, SAMModelName
+from instantlearn.utils.constants import Backend, CompressionMode, SAMModelName
 
 from .prompt_generators import BidirectionalPromptGenerator
+
+logger = logging.getLogger(__name__)
 
 
 class EncoderForwardFeaturesWrapper(nn.Module):
     """Wrapper for image encoder to expose forward_features method for export."""
-
-    IMAGENET_DEFAULT_MEAN = torch.tensor((0.485, 0.456, 0.406))
-    IMAGENET_DEFAULT_STD = torch.tensor((0.229, 0.224, 0.225))
 
     def __init__(
         self,
@@ -32,16 +38,27 @@ class EncoderForwardFeaturesWrapper(nn.Module):
         ignore_token_length: int,
         input_size: int = 512,
     ) -> None:
+        """Initialize the encoder wrapper.
+
+        Args:
+            encoder: The underlying encoder module.
+            ignore_token_length: Number of tokens to ignore.
+            input_size: Input image size.
+        """
         super().__init__()
         self.encoder = encoder
         self.ignore_token_length = ignore_token_length
         self.input_size = input_size
+        self.register_buffer("IMAGENET_DEFAULT_MEAN", torch.tensor((0.485, 0.456, 0.406)))
+        self.register_buffer("IMAGENET_DEFAULT_STD", torch.tensor((0.229, 0.224, 0.225)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass to get encoder features."""
+        imagenet_mean = self.IMAGENET_DEFAULT_MEAN.to(device=x.device, dtype=x.dtype)
+        imagenet_std = self.IMAGENET_DEFAULT_STD.to(device=x.device, dtype=x.dtype)
         x = x.float() / 255.0
         x = functional.interpolate(x, size=(self.input_size, self.input_size), mode="bilinear")
-        x = (x - self.IMAGENET_DEFAULT_MEAN[None, :, None, None]) / self.IMAGENET_DEFAULT_STD[None, :, None, None]
+        x = (x - imagenet_mean[None, :, None, None]) / imagenet_std[None, :, None, None]
         features = self.encoder.forward_features(x)
         features = features[:, self.ignore_token_length :, :]  # ignore CLS and other tokens
         return functional.normalize(features, p=2, dim=-1)
@@ -56,47 +73,67 @@ class MatcherInferenceGraph(nn.Module):
         prompt_generator: BidirectionalPromptGenerator,
         sam_decoder: SamDecoder,
         ref_features: ReferenceFeatures,
+        postprocessor: PostProcessor | None = None,
     ) -> None:
+        """Initialize the inference graph with frozen reference features."""
         super().__init__()
         self.encoder = encoder
         self.prompt_generator = prompt_generator
         self.sam_decoder = sam_decoder
 
+        # Register post-processor as a proper submodule
+        # so parameters are captured during tracing/export.
+        self.add_module("export_postprocessor", postprocessor)
+
         # Freeze reference features as model constants
         self.register_buffer("ref_embeddings", ref_features.ref_embeddings)
         self.register_buffer("masked_ref_embeddings", ref_features.masked_ref_embeddings)
         self.register_buffer("flatten_ref_masks", ref_features.flatten_ref_masks)
-        self.register_buffer("category_ids", torch.tensor(ref_features.category_ids))
+        self.register_buffer("category_ids", torch.tensor(ref_features.category_ids, device=ref_features.device))
 
     def forward(self, target_image: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Single image forward pass for export: target_image [1, 3, H, W] → (masks, scores, labels)."""
-        # Get original size from input tensor [1, 3, H, W]
-        original_sizes = torch.stack([
-            torch.tensor(target_image.size(2)),
-            torch.tensor(target_image.size(3)),
-        ]).unsqueeze(0)
-
         # Encode target [1, num_patches, embed_dim]
         target_embeddings = self.encoder(target_image)
+        feature_device = target_embeddings.device
+
+        # Align frozen reference tensors to target embedding device for trace-time safety.
+        # This prevents mixed-device matmul when model buffers and encoder output diverge.
+        ref_embeddings = self.ref_embeddings.to(feature_device)
+        masked_ref_embeddings = self.masked_ref_embeddings.to(feature_device)
+        flatten_ref_masks = self.flatten_ref_masks.to(feature_device)
+        category_ids = self.category_ids.to(feature_device)
+
+        # Get original size from input tensor [1, 3, H, W] using public APIs only.
+        # scalar_tensor preserves dynamic shape in export without relying on private/legacy ONNX helpers.
+        height = torch.scalar_tensor(target_image.shape[2], dtype=torch.long, device=feature_device)
+        width = torch.scalar_tensor(target_image.shape[3], dtype=torch.long, device=feature_device)
+        original_sizes = torch.stack([height, width], dim=0).unsqueeze(0)
 
         # Generate prompts using frozen ref_features
         # point_prompts: [1, C, max_points, 4], num_points: [1, C], similarities: [1, C, feat_size, feat_size]
         point_prompts, similarities = self.prompt_generator.forward(
-            self.ref_embeddings,
-            self.masked_ref_embeddings,
-            self.flatten_ref_masks,
-            self.category_ids,
+            ref_embeddings,
+            masked_ref_embeddings,
+            flatten_ref_masks,
+            category_ids,
             target_embeddings,
             original_sizes,
         )
 
         # Decode using export-friendly method (single image, returns tensors)
-        return self.sam_decoder.forward_export(
+        masks, scores, labels = self.sam_decoder.forward_export(
             target_image[0],  # Single image [3, H, W]
-            self.category_ids,
+            category_ids,
             point_prompts[0],  # [C, max_points, 4]
             similarities[0],  # [C, feat_size, feat_size]
         )
+
+        # Apply exportable post-processing (if any)
+        if self.export_postprocessor is not None:
+            masks, scores, labels = self.export_postprocessor(masks, scores, labels)
+
+        return masks, scores, labels
 
 
 class Matcher(Model):
@@ -154,10 +191,12 @@ class Matcher(Model):
         encoder_model: str = "dinov3_large",
         confidence_threshold: float | None = 0.38,
         use_mask_refinement: bool = True,
-        use_nms: bool = True,
         precision: str = "bf16",
         compile_models: bool = False,
         device: str = "cuda",
+        postprocessor: PostProcessor | None = None,
+        similarity_threshold: float | None = None,
+        num_grid_cells: int = 8,
     ) -> None:
         """Initialize the Matcher model.
 
@@ -169,12 +208,23 @@ class Matcher(Model):
             confidence_threshold: Minimum confidence score for keeping predicted masks
                                  in the final output. Higher values = stricter filtering, fewer masks.
             use_mask_refinement: Whether to use 2-stage mask refinement with box prompts.
-            use_nms: Whether to use NMS in SamDecoder.
             precision: Model precision ("bf16", "fp32").
             compile_models: Whether to compile models with torch.compile.
             device: Device for inference.
+            postprocessor: Post-processor applied after predict().
+                Defaults to :func:`~instantlearn.components.postprocessing.default_postprocessor`
+                (MaskIoMNMS + BoxIoMNMS).
+            similarity_threshold: When set, supplement bidirectional-matched points with
+                additional target patches exceeding this similarity to the reference.
+                Helps detect more objects when reference masks cover few patches.
+                Set to None to disable. Default: None.
+            num_grid_cells: Grid cells per dimension for spatial diversity filtering.
+                When > 0, foreground points are deduplicated per grid cell before top-k
+                selection, preventing point clustering on large objects. Default: 8.
         """
-        super().__init__()
+        if postprocessor is None:
+            postprocessor = default_postprocessor()
+        super().__init__(postprocessor=postprocessor)
         # SAM predictor
         self.sam_predictor = load_sam_model(
             sam,
@@ -206,6 +256,8 @@ class Matcher(Model):
             encoder_feature_size=self.encoder.feature_size,
             num_foreground_points=num_foreground_points,
             num_background_points=num_background_points,
+            similarity_threshold=similarity_threshold,
+            num_grid_cells=num_grid_cells,
         )
 
         # SAM decoder
@@ -213,11 +265,15 @@ class Matcher(Model):
             sam_predictor=self.sam_predictor,
             confidence_threshold=confidence_threshold,
             use_mask_refinement=use_mask_refinement,
-            use_nms=use_nms,
         )
 
         # Reference features (set during fit)
         self.ref_features: ReferenceFeatures | None = None
+
+    @property
+    def input_size(self) -> int:
+        """Square input size expected by the encoder (e.g. 512)."""
+        return self.encoder.input_size
 
     def fit(self, reference: Sample | list[Sample] | Batch) -> ReferenceFeatures:
         """Learn from reference images.
@@ -282,25 +338,109 @@ class Matcher(Model):
         )
 
         # Decode masks for all images
-        return self.segmenter(
+        predictions = self.segmenter(
             target_batch.images,
             self.ref_features.category_ids,
             point_prompts=point_prompts,
             similarities=similarities,
         )
+        return self.apply_postprocessing(predictions)
+
+    @staticmethod
+    def prepare_openvino_input(frame: np.ndarray, input_size: int) -> np.ndarray:
+        """Resize and reformat a frame for OpenVINO inference.
+
+        Converts an HWC uint8/float frame to a contiguous float32 NCHW tensor
+        resized to the model's expected square input dimensions.
+
+        Args:
+            frame: Input image in HWC layout (any dtype).
+            input_size: Target square side length (e.g. 512).
+
+        Returns:
+            Contiguous float32 array with shape ``[1, 3, input_size, input_size]``.
+        """
+        if frame.shape[0] != input_size or frame.shape[1] != input_size:
+            frame = cv2.resize(frame, (input_size, input_size), interpolation=cv2.INTER_LINEAR)
+        image = np.expand_dims(frame.transpose(2, 0, 1), axis=0)
+        return np.ascontiguousarray(image, dtype=np.float32)
+
+    @staticmethod
+    def resize_masks_to_frame(masks: np.ndarray, frame_h: int, frame_w: int) -> np.ndarray:
+        """Resize predicted masks to the original frame spatial size.
+
+        Uses nearest-neighbour index mapping so no external resize library is needed.
+
+        Args:
+            masks: Predicted masks, ``[1, N, H, W]`` or ``[N, H, W]``.
+            frame_h: Original frame height.
+            frame_w: Original frame width.
+
+        Returns:
+            Boolean mask array ``[N, frame_h, frame_w]``.
+        """
+        if masks.ndim == 4 and masks.shape[0] == 1:
+            masks = masks[0]
+
+        if masks.ndim == 3 and (masks.shape[1] != frame_h or masks.shape[2] != frame_w):
+            src_h, src_w = masks.shape[1], masks.shape[2]
+            row_idx = (np.arange(frame_h) * src_h // frame_h).clip(0, src_h - 1)
+            col_idx = (np.arange(frame_w) * src_w // frame_w).clip(0, src_w - 1)
+            masks = masks[:, row_idx][:, :, col_idx]
+
+        return masks > 0.5
+
+    @staticmethod
+    def _fix_onnx_output_names(onnx_path: Path, expected_names: list[str]) -> None:  # noqa: C901
+        """Ensure ONNX graph outputs have the expected names.
+
+        Registered buffers returned as outputs often get auto-generated names
+        (e.g. '39982') because the ONNX tracer treats them as graph constants.
+        Renames outputs in-place using the ONNX protobuf, also updating all
+        internal node references and initializers so the graph stays valid.
+        """
+        if not onnx_path.exists():
+            return
+
+        import onnx  # noqa: PLC0415
+
+        model = onnx.load(str(onnx_path))
+        rename_map: dict[str, str] = {}
+        for output, expected in zip(model.graph.output, expected_names, strict=False):
+            if output.name != expected:
+                rename_map[output.name] = expected
+        if not rename_map:
+            return
+        # Update node outputs that feed into graph outputs.
+        for node in model.graph.node:
+            for i, name in enumerate(node.output):
+                if name in rename_map:
+                    node.output[i] = rename_map[name]
+        # Update initializers (registered buffers appear here).
+        for initializer in model.graph.initializer:
+            if initializer.name in rename_map:
+                initializer.name = rename_map[initializer.name]
+        # Update the graph output names.
+        for output in model.graph.output:
+            if output.name in rename_map:
+                output.name = rename_map[output.name]
+        onnx.save(model, str(onnx_path))
 
     @torch.no_grad()
-    def export(
+    def export(  # noqa: C901, PLR0915
         self,
         export_dir: str | Path = Path("./exports/matcher"),
         backend: str | Backend = Backend.ONNX,
+        compression: CompressionMode = CompressionMode.INT8_SYM,
     ) -> Path:
         """Export model components.
 
         Args:
             export_dir: Directory to save exported models.
             backend: Export backend (ONNX, OpenVINO).
-            **kwargs: Additional export parameters.
+            compression: Weight compression mode for the exported OpenVINO model.
+                See :class:`~instantlearn.utils.constants.CompressionMode` for options.
+                Only applied when *backend* is ``OPENVINO``. Default: INT8_SYM.
 
         Returns:
             Path to export directory.
@@ -308,25 +448,79 @@ class Matcher(Model):
         Raises:
             ImportError: If OpenVINO is selected but not installed.
             RuntimeError: If fit() has not been called before predict().
+            ValueError: If INT4 compression is requested for OpenVINO export.
         """
         if self.ref_features is None:
             msg = "No reference features. Call fit() first."
             raise RuntimeError(msg)
 
+        # SAM-HQ-Tiny is not compatible with OpenVINO export (non-deterministic output).
+        # Automatically fall back to SAM-HQ-base and warn the user.
+        fallback_segmenter = None
+        if Backend(backend) == Backend.OPENVINO and self.sam_predictor.sam_model_name == SAMModelName.SAM_HQ_TINY:
+            logger.warning(
+                "SAM-HQ-Tiny is not supported for OpenVINO export. "
+                "Some of the layers are non-deterministic and so the exported model is not reliable for inference. "
+                "Falling back to SAM-HQ-base for the exported model. "
+                "SAM-HQ-base weights will be downloaded if not already cached.",
+            )
+            fallback_predictor = load_sam_model(
+                SAMModelName.SAM_HQ_BASE,
+                device="cpu",
+                precision="fp32",
+            )
+            fallback_segmenter = SamDecoder(
+                sam_predictor=fallback_predictor,
+                confidence_threshold=self.segmenter.confidence_threshold,
+                use_mask_refinement=self.segmenter.use_mask_refinement,
+            )
+
         export_path = Path(export_dir)
         export_path.mkdir(parents=True, exist_ok=True)
 
-        matcher = MatcherInferenceGraph(
-            encoder=EncoderForwardFeaturesWrapper(
-                self.encoder._model.model,
-                ignore_token_length=self.encoder._model.ignore_token_length,
-            ),
-            prompt_generator=self.prompt_generator,
-            sam_decoder=self.segmenter,
-            ref_features=self.ref_features,
-        )
+        export_device = self.ref_features.device
+        if backend == Backend.OPENVINO:
+            export_device = torch.device("cpu")
+        first_encoder_param = next(iter(self.encoder._model.model.parameters()), None)  # noqa: SLF001
+        if backend != Backend.OPENVINO and isinstance(first_encoder_param, torch.Tensor):
+            export_device = first_encoder_param.device
 
-        target_image = torch.randn(1, 3, self.encoder.input_size, self.encoder.input_size)
+        # INT4 compression does not work well on Matcher.
+        # Export will succeed but masks produces are just noise
+        if Backend(backend) == Backend.OPENVINO and compression in {
+            CompressionMode.INT4_SYM,
+            CompressionMode.INT4_ASYM,
+        }:
+            msg = (
+                "INT4 compressed models for Matcher produce random noisy masks and are not accurate. "
+                "Please use INT8 compression or no compression for Matcher exports."
+            )
+            raise ValueError(msg)
+
+        self.sam_predictor.sync_device(export_device, dtype=torch.float32)
+        self.segmenter.device = self.sam_predictor.device
+        ref_features = self.ref_features.to(export_device)
+
+        # Use fallback decoder (SAM-HQ-base) if SAM-HQ-Tiny was requested with OpenVINO
+        export_decoder = fallback_segmenter if fallback_segmenter is not None else self.segmenter
+
+        matcher = (
+            MatcherInferenceGraph(
+                encoder=EncoderForwardFeaturesWrapper(
+                    self.encoder._model.model,  # noqa: SLF001
+                    ignore_token_length=self.encoder._model.ignore_token_length,  # noqa: SLF001
+                ),
+                prompt_generator=self.prompt_generator,
+                sam_decoder=export_decoder,
+                ref_features=ref_features,
+                postprocessor=self.postprocessor,
+            )
+            .to(export_device)
+            .float()
+        )  # Force FP32 for stable CPU tracing
+
+        input_size = self.encoder.input_size
+        target_image = torch.randn(1, 3, input_size, input_size, device=export_device)
         if backend == Backend.ONNX:
             onnx_path = export_path / "matcher.onnx"
             torch.onnx.export(
@@ -341,36 +535,78 @@ class Matcher(Model):
                     "scores": {0: "num_masks"},
                     "labels": {0: "num_masks"},
                 },
-                verbose=True,
                 dynamo=False,
             )
+            self._fix_onnx_output_names(onnx_path, ["masks", "scores", "labels"])
             return onnx_path
 
         if backend == Backend.OPENVINO:
             try:
-                import openvino
+                import openvino  # noqa: PLC0415
 
-                # Export to ONNX first, then convert to OpenVINO
+                # Export to ONNX first, then convert to OpenVINO.
                 # Direct PyTorch → OpenVINO conversion fails on many ops (aten::pad, aten::unbind, etc.)
-                # ONNX → OpenVINO conversion has much better support
+                # ONNX → OpenVINO conversion has much better support.
                 onnx_path = export_path / "matcher.onnx"
-                torch.onnx.export(
-                    matcher,
-                    args=(target_image,),
-                    f=onnx_path,
-                    input_names=["target_image"],
-                    output_names=["masks", "scores", "labels"],
-                    dynamic_axes={
-                        "target_image": {2: "height", 3: "width"},
-                        "masks": {0: "num_masks", 1: "height", 2: "width"},
-                        "scores": {0: "num_masks"},
-                        "labels": {0: "num_masks"},
-                    },
-                    dynamo=False,
+                try:
+                    torch.onnx.export(
+                        matcher,
+                        args=(target_image,),
+                        f=onnx_path,
+                        input_names=["target_image"],
+                        output_names=["masks", "scores", "labels"],
+                        # Keep OpenVINO export graph static for stable GPU shape inference.
+                        # Dynamic axes here can lead to infer-time broadcast mismatches.
+                        dynamo=False,
+                    )
+                except RuntimeError as onnx_err:
+                    if "2GiB" in str(onnx_err) or "protobuf" in str(onnx_err):
+                        # Large models (e.g. SAM-HQ ViT-H ~2.6GB) exceed protobuf limit.
+                        # Re-export with string path so ONNX writes external data files.
+                        logger.info("Model exceeds ONNX 2GiB limit, re-exporting with external data")
+                        torch.onnx.export(
+                            matcher,
+                            args=(target_image,),
+                            f=str(onnx_path),
+                            input_names=["target_image"],
+                            output_names=["masks", "scores", "labels"],
+                            dynamo=False,
+                        )
+                    else:
+                        raise
+
+                # Prefer ONNX frontend path for better operator coverage.
+                # Fall back to direct conversion when ONNX export output is unavailable.
+                core = openvino.Core()
+                if onnx_path.exists():
+                    try:
+                        ov_model = core.read_model(str(onnx_path))
+                    except RuntimeError:
+                        ov_model = openvino.convert_model(matcher, example_input=target_image)
+                else:
+                    ov_model = openvino.convert_model(matcher, example_input=target_image)
+
+                # Fix output names: registered buffers returned as model outputs
+                # get auto-generated names (e.g. '39982') from the ONNX tracer.
+                expected_names = ["masks", "scores", "labels"]
+                for output, name in zip(ov_model.outputs, expected_names, strict=False):
+                    output.tensor.set_names({name})
+
+                # Reshape to static input for optimal GPU kernel compilation.
+                input_name = ov_model.inputs[0].get_any_name()
+                ov_model.reshape({input_name: [1, 3, input_size, input_size]})
+
+                # Apply weight compression if requested (INT8/INT4 via NNCF).
+                if compression not in {CompressionMode.FP32, CompressionMode.FP16}:
+                    from instantlearn.utils.compression import compress_model  # noqa: PLC0415
+
+                    ov_model = compress_model(ov_model, mode=compression)
+
+                openvino.save_model(
+                    ov_model,
+                    export_path / "matcher.xml",
+                    compress_to_fp16=compression == CompressionMode.FP16,
                 )
-                # Convert ONNX to OpenVINO
-                ov_model = openvino.convert_model(onnx_path)
-                openvino.save_model(ov_model, export_path / "matcher.xml")
                 return export_path / "matcher.xml"
             except ImportError as e:
                 msg = "OpenVINO is not installed. Please install it to use OpenVINO export."

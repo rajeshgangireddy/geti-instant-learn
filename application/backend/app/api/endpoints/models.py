@@ -7,16 +7,42 @@ from uuid import UUID
 
 from fastapi import Query, Response, status
 
-from api.routers import projects_router
-from dependencies import ModelServiceDep
+from api.routers import projects_router, system_router
+from dependencies import ModelServiceDep, SupportedModelRepoDep
+from domain.services.schemas.base import Pagination
 from domain.services.schemas.processor import (
     ProcessorCreateSchema,
     ProcessorListSchema,
     ProcessorSchema,
     ProcessorUpdateSchema,
+    SupportedModelsListSchema,
 )
 
 logger = logging.getLogger(__name__)
+
+
+@system_router.get(
+    path="/supported-models",
+    tags=["Supported Models"],
+    status_code=status.HTTP_200_OK,
+    responses={
+        status.HTTP_200_OK: {
+            "description": "Successfully retrieved supported models and their default configurations."
+        },
+    },
+)
+def get_supported_models(
+    supported_model_repo: SupportedModelRepoDep,
+    offset: Annotated[int, Query(ge=0, le=1000)] = 0,
+    limit: Annotated[int, Query(ge=0, le=1000)] = 20,
+) -> SupportedModelsListSchema:
+    """Return all supported model types with default configs and accepted prompt types."""
+    all_models = supported_model_repo.get_all()
+    paginated_models = all_models[offset : offset + limit]
+    return SupportedModelsListSchema(
+        models=paginated_models,
+        pagination=Pagination(count=len(paginated_models), total=len(all_models), offset=offset, limit=limit),
+    )
 
 
 @projects_router.get(
@@ -43,8 +69,6 @@ logger = logging.getLogger(__name__)
                                     "sam_model": "SAM-HQ-tiny",
                                     "encoder_model": "dinov3_small",
                                     "use_mask_refinement": False,
-                                    "compile_models": False,
-                                    "use_nms": True,
                                 },
                             },
                             {
@@ -61,8 +85,6 @@ logger = logging.getLogger(__name__)
                                     "point_selection_threshold": 0.65,
                                     "confidence_threshold": 0.42,
                                     "precision": "bf16",
-                                    "use_nms": True,
-                                    "compile_models": False,
                                 },
                             },
                             {
@@ -82,9 +104,6 @@ logger = logging.getLogger(__name__)
                                     "softmatching_score_threshold": 0.4,
                                     "softmatching_bidirectional": False,
                                     "precision": "bf16",
-                                    "use_nms": True,
-                                    "compile_models": False,
-                                    "compile_models": False,
                                 },
                             },
                             {
@@ -293,8 +312,6 @@ def get_model(project_id: UUID, model_id: UUID, model_service: ModelServiceDep) 
                                     "sam_model": "SAM-HQ-tiny",
                                     "encoder_model": "dinov3_small",
                                     "use_mask_refinement": False,
-                                    "compile_models": False,
-                                    "use_nms": True,
                                 },
                             },
                         },
@@ -317,8 +334,6 @@ def get_model(project_id: UUID, model_id: UUID, model_service: ModelServiceDep) 
                                     "softmatching_score_threshold": 0.4,
                                     "softmatching_bidirectional": False,
                                     "precision": "bf16",
-                                    "use_nms": True,
-                                    "compile_models": False,
                                 },
                             },
                         },

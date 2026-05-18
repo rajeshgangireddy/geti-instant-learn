@@ -13,7 +13,9 @@ type SourceWithoutConfig = Omit<SchemaSourceSchema, 'config'>;
 export type USBCameraConfig = components['schemas']['UsbCameraConfig'];
 type VideoFileConfig = components['schemas']['VideoFileConfig'];
 export type ImagesFolderConfig = components['schemas']['ImagesFolderConfig'];
-type SampleDatasetConfig = components['schemas']['SampleDatasetConfig'];
+type SampleDatasetConfig = components['schemas']['SampleDatasetConfig'] & {
+    dataset_id?: string | null;
+};
 
 export type SourceConfig = USBCameraConfig | VideoFileConfig | ImagesFolderConfig | SampleDatasetConfig;
 
@@ -29,16 +31,21 @@ type SinkWithoutConfig = Omit<SinkConfig, 'config'>;
 export type MQTTConfig = components['schemas']['MqttConfig'];
 export type MQTTSinkType = SinkWithoutConfig & { config: MQTTConfig };
 
+export type { SchemaSupportedModelMetadataSchema as SupportedModelMetadataType } from './openapi-spec';
+export type { SchemaSupportedPromptType as SupportedPromptType } from './openapi-spec';
+
 type MatcherConfig = components['schemas']['MatcherConfig'];
 type PerDINOConfig = components['schemas']['PerDinoConfig'];
 type SoftMatcherConfig = components['schemas']['SoftMatcherConfig'];
 type YoloeConfig = components['schemas']['YoloeConfig'];
+type Sam3Config = components['schemas']['Sam3Config'];
 
 export type ModelType = components['schemas']['ProcessorSchema'];
 export type MatcherModel = Omit<ModelType, 'config'> & { config: MatcherConfig };
 export type PerDINOModel = Omit<ModelType, 'config'> & { config: PerDINOConfig };
 export type SoftMatcherModel = Omit<ModelType, 'config'> & { config: SoftMatcherConfig };
 export type YoloeModel = Omit<ModelType, 'config'> & { config: YoloeConfig };
+export type Sam3Model = Omit<ModelType, 'config'> & { config: Sam3Config };
 
 export { $api, client } from './client';
 export {
@@ -59,6 +66,7 @@ export {
     type SchemaVisualPromptSchema as VisualPromptType,
     type SchemaPromptsListSchema as VisualPromptListType,
     type SchemaVisualPromptListItemSchema as VisualPromptItemType,
+    type SchemaTextPromptSchema as TextPromptType,
     type SchemaFrameMetadata as FrameAPIType,
     type SchemaFrameListResponse as FramesResponseType,
     type SchemaSinkCreateSchema as SinkCreateType,

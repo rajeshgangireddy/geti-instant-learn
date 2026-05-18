@@ -271,14 +271,14 @@ def test_update_source_success(service, dispatcher_mock):
     assert prev_active.active is False
     service.session.commit.assert_called_once()
 
-    # two events should be dispatched: one for disconnecting the previous source, one for updating the current
-    assert dispatcher_mock.dispatch.call_count == 2
-    events = [call.args[0] for call in dispatcher_mock.dispatch.call_args_list]
-    assert all(isinstance(ev, ComponentConfigChangeEvent) for ev in events)
-    assert all(ev.project_id == project_id for ev in events)
-    assert all(ev.component_type == ComponentType.SOURCE for ev in events)
-    assert events[0].component_id == prev_active.id
-    assert events[1].component_id == source_id
+    # Events for the same (project_id, component_type) are coalesced by BaseService,
+    # so only the last event (for the newly activated source) is dispatched.
+    assert dispatcher_mock.dispatch.call_count == 1
+    dispatched = dispatcher_mock.dispatch.call_args[0][0]
+    assert isinstance(dispatched, ComponentConfigChangeEvent)
+    assert dispatched.project_id == project_id
+    assert dispatched.component_type == ComponentType.SOURCE
+    assert dispatched.component_id == source_id
 
 
 def test_update_source_type_change_conflict(service, tmp_path):
@@ -400,3 +400,69 @@ def test_update_source_emits_event_when_no_connection_change(service, dispatcher
     assert ev.project_id == project_id
     assert ev.component_type == ComponentType.SOURCE
     assert ev.component_id == source_id
+
+
+def test_update_source_already_active_with_valid_path_succeeds(service, tmp_path):
+    """Test that updating an already-active source with a valid new path succeeds."""
+    project_id = uuid.uuid4()
+    source_id = uuid.uuid4()
+    service.project_repository.get_by_id.return_value = make_project(project_id)
+
+    # Create valid video files
+    old_video = tmp_path / "old_video.mp4"
+    old_video.touch()
+    new_video = tmp_path / "new_video.mp4"
+    new_video.touch()
+
+    # Existing active source with valid path
+    existing = make_source(
+        project_id=project_id,
+        source_id=source_id,
+        source_type=SourceType.VIDEO_FILE,
+        config_extra={"video_path": str(old_video)},
+        active=True,
+    )
+    service.source_repository.get_by_id_and_project.return_value = existing
+    service.source_repository.update.return_value = existing
+
+    # Update with a new valid path - should validate and succeed
+    update_schema = SourceUpdateSchema(
+        active=True,
+        config=VideoFileConfig(source_type=SourceType.VIDEO_FILE, video_path=str(new_video)),
+    )
+
+    result = service.update_source(project_id=project_id, source_id=source_id, update_data=update_schema)
+
+    assert result is not None
+    service.source_repository.update.assert_called_once()
+    service.session.commit.assert_called_once()
+
+
+def test_create_source_inactive_with_invalid_video_path_succeeds(service):
+    """Test that creating an inactive source with invalid path succeeds (no validation)."""
+    project_id = uuid.uuid4()
+    new_id = uuid.uuid4()
+    service.project_repository.get_by_id.return_value = make_project(project_id)
+    service.source_repository.get_active_in_project.return_value = None
+
+    new_source = make_source(
+        source_id=new_id,
+        project_id=project_id,
+        source_type=SourceType.VIDEO_FILE,
+        config_extra={"video_path": "/nonexistent/video.mp4"},
+        active=False,
+    )
+    service.source_repository.add.return_value = new_source
+
+    create_schema = SourceCreateSchema(
+        id=new_id,
+        active=False,  # Inactive, so validation should NOT run
+        config=VideoFileConfig(source_type=SourceType.VIDEO_FILE, video_path="/nonexistent/video.mp4"),
+    )
+
+    # Should not raise ValueError - validation only runs when active=True
+    result = service.create_source(project_id=project_id, create_data=create_schema)
+
+    assert result is not None
+    service.source_repository.add.assert_called_once()
+    service.session.commit.assert_called_once()

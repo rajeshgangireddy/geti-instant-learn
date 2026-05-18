@@ -1,19 +1,29 @@
 from queue import Empty, Queue
 from unittest.mock import MagicMock, call
 
+import numpy as np
 import pytest
 
+from domain.dispatcher import ComponentType
+from domain.services.schemas.processor import ErrorData, OutputData
 from runtime.core.components.base import StreamWriter
 from runtime.core.components.broadcaster import FrameBroadcaster
 from runtime.core.components.sink import Sink
 
+
+def make_output(name: str) -> OutputData:
+    return OutputData(results=[], frame=np.zeros((2, 2, 3), dtype=np.uint8))
+
+
+data1, data2, data3 = make_output("data1"), make_output("data2"), make_output("data3")
+
 test_cases = [
-    ("writes_all_items", ["data1", "data2", "data3"], ["data1", "data2", "data3"]),
+    ("writes_all_items", [data1, data2, data3], [data1, data2, data3]),
     ("handles_empty_queue", [], []),
     (
         "handles_intermittent_empty_exceptions",
-        ["data1", Empty(), "data2", Empty(), Empty(), "data3"],
-        ["data1", "data2", "data3"],
+        [data1, Empty(), data2, Empty(), Empty(), data3],
+        [data1, data2, data3],
     ),
 ]
 
@@ -55,3 +65,22 @@ class TestSink:
 
         expected_calls = [call(item) for item in expected_writes]
         assert self.mock_stream_writer.write.call_args_list == expected_calls
+
+    def test_error_data_is_forwarded_to_writer(self):
+        error = ErrorData(message="upstream failed", component=ComponentType.SOURCE)
+        data = make_output("data1")
+        items = [error, data]
+        iterator = iter(items)
+
+        def mock_get(*args, **kwargs):
+            try:
+                next_item = next(iterator)
+                return next_item
+            except StopIteration:
+                self.sink.stop()
+                raise Empty
+
+        self.out_queue.get.side_effect = mock_get
+        self.sink.run()
+
+        self.mock_stream_writer.write.assert_has_calls([call(error), call(data)])

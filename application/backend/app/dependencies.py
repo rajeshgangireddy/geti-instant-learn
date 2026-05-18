@@ -9,16 +9,31 @@ from sqlalchemy.orm import Session
 
 from domain.db.engine import get_session
 from domain.dispatcher import ConfigChangeDispatcher
+from domain.errors import DatasetNotFoundError
 from domain.repositories.frame import FrameRepository
 from domain.repositories.processor import ProcessorRepository
 from domain.repositories.project import ProjectRepository
 from domain.repositories.prompt import PromptRepository
 from domain.repositories.sink import SinkRepository
 from domain.repositories.source import SourceRepository
-from domain.services import LabelService, ModelService, ProjectService, PromptService, SinkService, SourceService
+from domain.repositories.supported_model import SupportedModelRepository
+from domain.services import (
+    LabelService,
+    ModelService,
+    ProjectService,
+    PromptService,
+    SinkService,
+    SourceService,
+)
+from domain.services.dataset_discovery import DatasetResolver
+from domain.services.schemas.dataset import DatasetsListSchema
+from domain.services.schemas.device import AvailableDeviceSchema
+from runtime.core.components.factories.reader import StreamReaderFactory
+from runtime.core.components.validators.reader_config import ReaderConfigValidator
 from runtime.core.components.validators.sink_connection import SinkConnectionValidator
 from runtime.pipeline_manager import PipelineManager
 from runtime.services.frame import FrameService
+from runtime.services.license import LicenseService
 from runtime.services.source_type import SourceTypeService
 from runtime.webrtc.manager import WebRTCManager
 from settings import get_settings
@@ -41,6 +56,19 @@ def get_config_dispatcher(request: Request) -> ConfigChangeDispatcher:
 def get_webrtc_manager(request: Request) -> WebRTCManager:
     """Provides the global WebRTCManager instance from FastAPI application's state."""
     return request.app.state.webrtc_manager
+
+
+def get_available_datasets(request: Request) -> DatasetsListSchema:
+    """Dependency that provides startup-cached dataset metadata list."""
+    available_datasets: DatasetsListSchema = request.app.state.available_datasets
+    if not available_datasets.datasets:
+        raise DatasetNotFoundError("No datasets found in startup cache.")
+    return available_datasets
+
+
+def get_available_devices(request: Request) -> list[AvailableDeviceSchema]:
+    """Dependency that provides startup-cached available devices list."""
+    return request.app.state.available_devices
 
 
 # --- DB session dependency ---
@@ -76,6 +104,11 @@ def get_processor_repository(session: SessionDep) -> ProcessorRepository:
 def get_sink_repository(session: SessionDep) -> SinkRepository:
     """Provides a SinkRepository instance."""
     return SinkRepository(session)
+
+
+def get_supported_model_repository() -> SupportedModelRepository:
+    """Provides a SupportedModelRepository instance."""
+    return SupportedModelRepository()
 
 
 # --- Service providers ---
@@ -140,9 +173,26 @@ def get_sink_connection_validator() -> SinkConnectionValidator:
     return SinkConnectionValidator()
 
 
+def get_dataset_resolver(request: Request) -> DatasetResolver | None:
+    """Dependency that provides the startup-cached DatasetResolver instance."""
+    return request.app.state.dataset_resolver
+
+
+def get_reader_config_validator(
+    dataset_resolver: Annotated[DatasetResolver | None, Depends(get_dataset_resolver)],
+) -> ReaderConfigValidator:
+    """Dependency that provides a reader config validator instance."""
+    return ReaderConfigValidator(StreamReaderFactory(dataset_resolver=dataset_resolver))
+
+
 def get_discovery_service() -> SourceTypeService:
     """Dependency that provides a DiscoveryService instance."""
     return SourceTypeService()
+
+
+def get_license_service() -> LicenseService:
+    """Dependency that provides a LicenseService instance."""
+    return LicenseService()
 
 
 # --- Dependency aliases ---
@@ -155,4 +205,9 @@ PipelineManagerDep = Annotated[PipelineManager, Depends(get_pipeline_manager)]
 ModelServiceDep = Annotated[ModelService, Depends(get_model_service)]
 SinkServiceDep = Annotated[SinkService, Depends(get_sink_service)]
 SinkConnectionValidatorDep = Annotated[SinkConnectionValidator, Depends(get_sink_connection_validator)]
+ReaderConfigValidatorDep = Annotated[ReaderConfigValidator, Depends(get_reader_config_validator)]
 DiscoveryServiceDep = Annotated[SourceTypeService, Depends(get_discovery_service)]
+LicenseServiceDep = Annotated[LicenseService, Depends(get_license_service)]
+AvailableDatasetsDep = Annotated[DatasetsListSchema, Depends(get_available_datasets)]
+AvailableDevicesDep = Annotated[list[AvailableDeviceSchema], Depends(get_available_devices)]
+SupportedModelRepoDep = Annotated[SupportedModelRepository, Depends(get_supported_model_repository)]

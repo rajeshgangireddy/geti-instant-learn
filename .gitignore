@@ -153,3 +153,14 @@ lightning_logs
 
 # Autosummary generated rst files
 library/**/_autosummary/
+/models/
+
+# Benchmark & example outputs
+benchmark_results/
+outputs/
+
+# autodownloaded datasets
+library/datasets/
+
+
+.agents/

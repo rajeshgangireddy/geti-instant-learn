@@ -5,12 +5,12 @@
 
 import { FormEvent, useState } from 'react';
 
-import { MatcherModel, ModelType, PerDINOModel, SoftMatcherModel, YoloeModel } from '@/api';
+import { MatcherModel, ModelType, PerDINOModel, Sam3Model, SoftMatcherModel, YoloeModel } from '@/api'; main
 import { Button, ButtonGroup, Content, Dialog, Divider, Flex, Form, Heading, Item, Picker, Switch } from '@geti/ui';
 
 import { useUpdateModel } from '../../api/use-update-model';
 import { NumberField } from './number-field.component';
-import { isMatcherModel, isPerDINOModel, isSoftMatcherModel, isYoloeModel } from './utils';
+import { isMatcherModel, isPerDINOModel, isSam3Model, isSoftMatcherModel, isYoloeModel } from './utils'; main
 
 const ENCODER_MODELS = [
     { label: 'DINOv3 Small', value: 'dinov3_small' },
@@ -23,16 +23,26 @@ const ENCODER_MODELS = [
 // ATM backend does not provide a list of available models, so we have to hardcode them here.
 type EncoderModel = (typeof ENCODER_MODELS)[number]['value'];
 
-type DecoderModel = ModelType['config']['sam_model'];
+// sam_model type is shared across Matcher/PerDINO/SoftMatcher configs;
+// extracted from MatcherModel since Sam3Config does not include this field.
+type DecoderModel = MatcherModel['config']['sam_model'];
 
 const DECODER_MODELS: { label: string; value: DecoderModel }[] = [
     {
-        label: 'SAM-HQ',
-        value: 'SAM-HQ',
-    },
-    {
         label: 'SAM-HQ Tiny',
         value: 'SAM-HQ-tiny',
+    },
+    {
+        label: 'SAM-HQ Base',
+        value: 'SAM-HQ-base',
+    },
+    {
+        label: 'SAM-HQ Large',
+        value: 'SAM-HQ-large',
+    },
+    {
+        label: 'SAM-HQ',
+        value: 'SAM-HQ',
     },
     {
         label: 'SAM2 Tiny',
@@ -87,6 +97,13 @@ const YOLOE_MODELS: { label: string; value: YoloeModelName }[] = [
     { label: 'YOLOE 26 XLarge', value: 'yoloe-26x-seg' },
 ];
 
+type CompressionPreset = MatcherModel['config']['preset'];
+
+const COMPRESSION_PRESETS: { label: string; value: CompressionPreset }[] = [
+    { label: 'Throughput', value: 'throughput' },
+    { label: 'Accuracy', value: 'accuracy' },
+];
+
 interface SelectionProps<T extends string> {
     value: T;
     onChange: (model: T) => void;
@@ -119,8 +136,10 @@ const MatcherConfiguration = ({ model, onClose }: MatcherConfigurationProps) => 
     const [decoderModel, setDecoderModel] = useState<DecoderModel>(model.config.sam_model);
     const [precision, setPrecision] = useState<Precision>(model.config.precision as Precision);
     const [useMaskRefinement, setUseMaskRefinement] = useState<boolean>(model.config.use_mask_refinement);
-    const [compileModels, setCompileModels] = useState<boolean>(model.config.compile_models);
-    const [useNMS, setUseNMS] = useState<boolean>(model.config.use_nms);
+    const [detectSmallObjects, setDetectSmallObjects] = useState<boolean>(
+        model.config.similarity_threshold !== null && model.config.similarity_threshold !== undefined
+    );
+    const [preset, setPreset] = useState<CompressionPreset>(model.config.preset ?? 'throughput');
 
     const updateModelMutation = useUpdateModel();
 
@@ -132,8 +151,9 @@ const MatcherConfiguration = ({ model, onClose }: MatcherConfigurationProps) => 
         decoderModel === model.config.sam_model &&
         precision === model.config.precision &&
         useMaskRefinement === model.config.use_mask_refinement &&
-        compileModels === model.config.compile_models &&
-        useNMS === model.config.use_nms;
+        detectSmallObjects ===
+            (model.config.similarity_threshold !== null && model.config.similarity_threshold !== undefined) &&
+        preset === (model.config.preset ?? 'throughput');
 
     const updateModel = (event: FormEvent) => {
         event.preventDefault();
@@ -151,9 +171,10 @@ const MatcherConfiguration = ({ model, onClose }: MatcherConfigurationProps) => 
                     encoder_model: encoderModel,
                     sam_model: decoderModel,
                     use_mask_refinement: useMaskRefinement,
-                    compile_models: compileModels,
-                    use_nms: useNMS,
+                    similarity_threshold: detectSmallObjects ? 0.65 : null,
+                    num_grid_cells: detectSmallObjects ? 8 : model.config.num_grid_cells,
                     precision,
+                    preset,
                 },
             },
             onClose
@@ -202,15 +223,20 @@ const MatcherConfiguration = ({ model, onClose }: MatcherConfigurationProps) => 
                     value={confidenceThreshold}
                 />
                 <Selection label={'Precision'} value={precision} onChange={setPrecision} items={PRECISIONS} />
+                <Selection
+                    label={'Compression preset'}
+                    value={preset}
+                    onChange={setPreset}
+                    items={COMPRESSION_PRESETS}
+                />
+                <Flex alignItems={'center'} width={'100%'} wrap={'wrap'}>
+                    <Switch isEmphasized isSelected={detectSmallObjects} onChange={setDetectSmallObjects}>
+                        Detect small objects
+                    </Switch>
+                </Flex>
                 <Flex alignItems={'center'} width={'100%'} wrap={'wrap'}>
                     <Switch isEmphasized isSelected={useMaskRefinement} onChange={setUseMaskRefinement}>
                         Use mask refinement
-                    </Switch>
-                    <Switch isEmphasized isSelected={useNMS} onChange={setUseNMS}>
-                        Merge overlapping results
-                    </Switch>
-                    <Switch isEmphasized isSelected={compileModels} onChange={setCompileModels}>
-                        Optimise models
                     </Switch>
                 </Flex>
                 <ButtonGroup align={'end'}>
@@ -248,8 +274,6 @@ const PerDINOConfiguration = ({ model, onClose }: PerDINOConfigurationProps) => 
     const [encoderModel, setEncoderModel] = useState<EncoderModel>(model.config.encoder_model as EncoderModel);
     const [decoderModel, setDecoderModel] = useState<DecoderModel>(model.config.sam_model);
     const [precision, setPrecision] = useState<Precision>(model.config.precision as Precision);
-    const [compileModels, setCompileModels] = useState<boolean>(model.config.compile_models);
-    const [useNMS, setUseNMS] = useState<boolean>(model.config.use_nms);
     const [pointSelectionThreshold, setPointSelectionThreshold] = useState<number>(
         model.config.point_selection_threshold
     );
@@ -264,9 +288,7 @@ const PerDINOConfiguration = ({ model, onClose }: PerDINOConfigurationProps) => 
         pointSelectionThreshold === model.config.point_selection_threshold &&
         encoderModel === model.config.encoder_model &&
         decoderModel === model.config.sam_model &&
-        precision === model.config.precision &&
-        compileModels === model.config.compile_models &&
-        useNMS === model.config.use_nms;
+        precision === model.config.precision;
 
     const updateModel = (event: FormEvent) => {
         event.preventDefault();
@@ -285,8 +307,6 @@ const PerDINOConfiguration = ({ model, onClose }: PerDINOConfigurationProps) => 
                     point_selection_threshold: pointSelectionThreshold,
                     encoder_model: encoderModel,
                     sam_model: decoderModel,
-                    compile_models: compileModels,
-                    use_nms: useNMS,
                     precision,
                 },
             },
@@ -352,14 +372,6 @@ const PerDINOConfiguration = ({ model, onClose }: PerDINOConfigurationProps) => 
                     value={pointSelectionThreshold}
                 />
                 <Selection label={'Precision'} value={precision} onChange={setPrecision} items={PRECISIONS} />
-                <Flex alignItems={'center'} width={'100%'} wrap={'wrap'}>
-                    <Switch isEmphasized isSelected={useNMS} onChange={setUseNMS}>
-                        Merge overlapping results
-                    </Switch>
-                    <Switch isEmphasized isSelected={compileModels} onChange={setCompileModels}>
-                        Optimise models
-                    </Switch>
-                </Flex>
                 <ButtonGroup align={'end'}>
                     <Button variant={'secondary'} onPress={onClose}>
                         Cancel
@@ -394,8 +406,6 @@ const SoftMatcherConfiguration = ({ model, onClose }: SoftMatcherConfigurationPr
     const [encoderModel, setEncoderModel] = useState<EncoderModel>(model.config.encoder_model as EncoderModel);
     const [decoderModel, setDecoderModel] = useState<DecoderModel>(model.config.sam_model);
     const [precision, setPrecision] = useState<Precision>(model.config.precision as Precision);
-    const [compileModels, setCompileModels] = useState<boolean>(model.config.compile_models);
-    const [useNMS, setUseNMS] = useState<boolean>(model.config.use_nms);
     const [useSampling, setUseSampling] = useState<boolean>(model.config.use_sampling);
     const [useSpatialSampling, setUseSpatialSampling] = useState<boolean>(model.config.use_spatial_sampling);
     const [approximateMatching, setApproximateMatching] = useState<boolean>(model.config.approximate_matching);
@@ -415,8 +425,6 @@ const SoftMatcherConfiguration = ({ model, onClose }: SoftMatcherConfigurationPr
         encoderModel === model.config.encoder_model &&
         decoderModel === model.config.sam_model &&
         precision === model.config.precision &&
-        compileModels === model.config.compile_models &&
-        useNMS === model.config.use_nms &&
         useSampling === model.config.use_sampling &&
         useSpatialSampling === model.config.use_spatial_sampling &&
         approximateMatching === model.config.approximate_matching &&
@@ -438,8 +446,6 @@ const SoftMatcherConfiguration = ({ model, onClose }: SoftMatcherConfigurationPr
                     confidence_threshold: confidenceThreshold,
                     encoder_model: encoderModel,
                     sam_model: decoderModel,
-                    compile_models: compileModels,
-                    use_nms: useNMS,
                     softmatching_bidirectional: softMatchingBidirectional,
                     softmatching_score_threshold: softMatchingScoreThreshold,
                     approximate_matching: approximateMatching,
@@ -506,12 +512,6 @@ const SoftMatcherConfiguration = ({ model, onClose }: SoftMatcherConfigurationPr
                     <Switch isEmphasized isSelected={softMatchingBidirectional} onChange={setSoftMatchingBidirectional}>
                         Bidirectional soft matching
                     </Switch>
-                    <Switch isEmphasized isSelected={useNMS} onChange={setUseNMS}>
-                        Merge overlapping results
-                    </Switch>
-                    <Switch isEmphasized isSelected={compileModels} onChange={setCompileModels}>
-                        Optimise models
-                    </Switch>
                     <Switch isEmphasized isSelected={approximateMatching} onChange={setApproximateMatching}>
                         Approximate matching
                     </Switch>
@@ -522,6 +522,80 @@ const SoftMatcherConfiguration = ({ model, onClose }: SoftMatcherConfigurationPr
                         Use sampling
                     </Switch>
                 </Flex>
+                <ButtonGroup align={'end'}>
+                    <Button variant={'secondary'} onPress={onClose}>
+                        Cancel
+                    </Button>
+                    <Button
+                        type={'submit'}
+                        variant={'primary'}
+                        isPending={updateModelMutation.isPending}
+                        isDisabled={isConfigureButtonDisabled}
+                    >
+                        Configure
+                    </Button>
+                </ButtonGroup>
+            </Flex>
+        </Form>
+    );
+};
+
+interface Sam3ConfigurationProps {
+    model: Sam3Model;
+    onClose: () => void;
+}
+
+const Sam3Configuration = ({ model, onClose }: Sam3ConfigurationProps) => {
+    const [confidenceThreshold, setConfidenceThreshold] = useState<number>(model.config.confidence_threshold);
+    const [resolution, setResolution] = useState<number>(model.config.resolution);
+    const [precision, setPrecision] = useState<Precision>(model.config.precision as Precision);
+
+    const updateModelMutation = useUpdateModel();
+
+    const isConfigureButtonDisabled =
+        confidenceThreshold === model.config.confidence_threshold &&
+        resolution === model.config.resolution &&
+        precision === model.config.precision;
+
+    const updateModel = (event: FormEvent) => {
+        event.preventDefault();
+
+        updateModelMutation.mutate(
+            {
+                active: model.active,
+                name: model.name,
+                id: model.id,
+                config: {
+                    model_type: model.config.model_type,
+                    confidence_threshold: confidenceThreshold,
+                    resolution,
+                    precision,
+                },
+            },
+            onClose
+        );
+    };
+
+    return (
+        <Form onSubmit={updateModel}>
+            <Flex direction={'column'} gap={'size-200'}>
+                <NumberField
+                    label={'Confidence threshold'}
+                    minValue={0}
+                    maxValue={1}
+                    step={0.01}
+                    onChange={setConfidenceThreshold}
+                    value={confidenceThreshold}
+                />
+                <NumberField
+                    label={'Resolution'}
+                    minValue={224}
+                    maxValue={2048}
+                    step={16}
+                    onChange={setResolution}
+                    value={resolution}
+                />
+                <Selection label={'Precision'} value={precision} onChange={setPrecision} items={PRECISIONS} />
                 <ButtonGroup align={'end'}>
                     <Button variant={'secondary'} onPress={onClose}>
                         Cancel
@@ -659,6 +733,8 @@ export const ModelConfigurationDialog = ({ model, onClose }: ModelConfigurationD
                     <PerDINOConfiguration model={model} onClose={onClose} />
                 ) : isSoftMatcherModel(model) ? (
                     <SoftMatcherConfiguration model={model} onClose={onClose} />
+                ) : isSam3Model(model) ? (
+                    <Sam3Configuration model={model} onClose={onClose} />
                 ) : isYoloeModel(model) ? (
                     <YoloeConfiguration model={model} onClose={onClose} />
                 ) : null}

@@ -36,9 +36,6 @@ class Settings(BaseSettings):
     environment: Literal["dev", "prod"] = "dev"
     static_files_dir: str | None = Field(default=None, alias="STATIC_FILES_DIR")
 
-    # Runtime
-    device: Literal["cpu", "cuda", "xpu"] = Field(default="cpu", alias="DEVICE")
-
     # Server
     host: str = Field(default="localhost", alias="HOST")
     port: int = Field(default=9100, alias="PORT")
@@ -54,7 +51,31 @@ class Settings(BaseSettings):
     db_filename: str = "instant_learn.db"
 
     # Template datasets
-    template_dataset_path: str = Field(default="templates/datasets/coffee-berries", alias="TEMPLATE_DATASET_PATH")
+    template_dataset_path: str = Field(default="templates/datasets", alias="TEMPLATE_DATASET_PATH")
+
+    # License
+    license_accept_env_var: str = "INSTANTLEARN_LICENSE_ACCEPTED"
+
+    @property
+    def config_dir(self) -> Path:
+        """Path to the config directory (~/.config/instantlearn on Unix, %APPDATA%/instantlearn on Windows)."""
+        if sys.platform == "win32":
+            # Windows: use APPDATA or fall back to home
+            appdata = os.environ.get("APPDATA")
+            if appdata:
+                return Path(appdata) / "instantlearn"
+            return Path.home() / "AppData" / "Roaming" / "instantlearn"
+
+        # Unix-like (Linux, macOS): use XDG_CONFIG_HOME or ~/.config
+        xdg_config = os.environ.get("XDG_CONFIG_HOME")
+        if xdg_config:
+            return Path(xdg_config) / "instantlearn"
+        return Path.home() / ".config" / "instantlearn"
+
+    @property
+    def license_consent_file_path(self) -> Path:
+        """Path to the license consent file."""
+        return self.config_dir / ".license_accepted"
 
     @property
     def template_dataset_dir(self) -> Path:
@@ -92,15 +113,30 @@ class Settings(BaseSettings):
     supported_extensions: set[str] = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"}
 
     # Thumbnail generation
-    thumbnail_max_dimension: int = 300
-    thumbnail_line_thickness_ratio: float = 0.005  # 0.5% of smaller image dimension
-    thumbnail_min_line_thickness: int = 2
-    thumbnail_fill_opacity: float = 0.5  # 50% opacity for annotation fill
-    thumbnail_jpeg_quality: int = 85
+    thumbnail_max_dimension: int = Field(default=400, ge=0, alias="THUMBNAIL_MAX_DIMENSION")
+    thumbnail_line_thickness_ratio: float = Field(
+        default=0.005, ge=0.0, le=1.0, alias="THUMBNAIL_LINE_THICKNESS_RATIO"
+    )  # 0.5% of smaller image dimension
+    thumbnail_min_line_thickness: int = Field(default=2, ge=0, alias="THUMBNAIL_MIN_LINE_THICKNESS")
+    thumbnail_fill_opacity: float = Field(
+        default=0.5, ge=0.0, le=1.0, alias="THUMBNAIL_FILL_OPACITY"
+    )  # 50% opacity for annotation fill
+    thumbnail_jpeg_quality: int = Field(default=90, ge=0, le=100, alias="THUMBNAIL_JPEG_QUALITY")
+
+    # SAM3
+    sam3_hybrid_mode: bool = Field(
+        default=False,
+        alias="SAM3_HYBRID_MODE",
+        description="When enabled, SAM3 canvas-mode prompts include real label names alongside bounding boxes. "
+        "Disabled by default to avoid degraded performance from conflicting or nonsensical label names.",
+    )
 
     # Processor configuration
-    processor_batch_size: int = Field(default=3, alias="PROCESSOR_BATCH_SIZE")
+    processor_batch_size: int = Field(default=1, alias="PROCESSOR_BATCH_SIZE")
+    processor_frame_skip_interval: int = Field(default=3, ge=0, alias="PROCESSOR_FRAME_SKIP_INTERVAL")
+    processor_frame_skip_amount: int = Field(default=2, ge=0, alias="PROCESSOR_FRAME_SKIP_AMOUNT")
     processor_inference_enabled: bool = Field(default=True, alias="PROCESSOR_INFERENCE_ENABLED")
+    processor_openvino_enabled: bool = Field(default=True, alias="PROCESSOR_OPENVINO_ENABLED")
 
     # WebRTC
     webrtc_advertise_ip: str | None = Field(default=None, alias="WEBRTC_ADVERTISE_IP")
@@ -113,8 +149,14 @@ class Settings(BaseSettings):
     stun_server: str | None = Field(default=None, alias="STUN_SERVER")
 
     # Inference visualization settings
+    visualize_masks: bool = Field(default=False, alias="VISUALIZE_MASKS")
+    visualize_boxes: bool = Field(default=True, alias="VISUALIZE_BOXES")
+    visualize_labels: bool = Field(default=True, alias="VISUALIZE_LABELS")
     mask_alpha: float = Field(default=0.5, alias="MASK_ALPHA")
     mask_outline_thickness: int = Field(default=3, alias="MASK_OUTLINE_THICKNESS")
+    box_thickness: int = Field(default=4, alias="BOX_THICKNESS")
+    label_text_height_px: int = Field(default=24, ge=1, alias="LABEL_TEXT_HEIGHT_PX")
+    visualization_scale: float = Field(default=1.0, alias="VISUALIZATION_SCALE")
 
     @property
     def ice_servers(self) -> list[dict]:

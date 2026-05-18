@@ -18,11 +18,21 @@ from starlette.responses import Response
 
 import api.endpoints  # noqa: F401, pylint: disable=unused-import  # Importing for endpoint registration
 from api.error_handler import custom_exception_handler
-from api.routers import projects_router, source_types_router, webrtc_router
+from api.routers import (
+    projects_router,
+    system_router,
+)
+from dependencies import LicenseServiceDep
 from domain.db.engine import get_session_factory, run_db_migrations
 from domain.dispatcher import ConfigChangeDispatcher
-from domain.services.schemas.health import HealthCheckSchema
+from domain.errors import DatasetNotFoundError
+from domain.services.dataset_discovery import DatasetResolver
+from domain.services.schemas.base import Pagination
+from domain.services.schemas.dataset import DatasetsListSchema
+from domain.services.schemas.health import HealthCheckSchema, HealthStatus
+from runtime.components import DefaultComponentFactory
 from runtime.pipeline_manager import PipelineManager
+from runtime.services.device import list_available_devices
 from runtime.webrtc.manager import WebRTCManager
 from runtime.webrtc.sdp_handler import SDPHandler
 from settings import get_settings
@@ -45,13 +55,40 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         format=settings.log_format,
         force=True,
     )
+    # Suppress noise from aiortc when logging level is set to DEBUG
+    logging.getLogger("aiortc").setLevel(logging.INFO)
+
     logger.info(f"Starting {settings.app_name} application...")
     logger.info(settings.format_for_logging())
     run_db_migrations()
 
+    app.state.available_devices = list_available_devices()
+    session_factory = get_session_factory()
+
+    # Dataset cache is startup-static by design and refreshed only on app restart.
+    dataset_resolver: DatasetResolver | None = None
+    datasets = DatasetsListSchema(
+        datasets=[],
+        pagination=Pagination(count=0, total=0, offset=0, limit=0),
+    )
+    try:
+        dataset_resolver = DatasetResolver(settings.template_dataset_dir)
+        datasets = dataset_resolver.get_datasets()
+    except DatasetNotFoundError as e:
+        logger.error("Dataset discovery failed during startup: %s", str(e))
+
+    app.state.available_datasets = datasets
+    app.state.dataset_resolver = dataset_resolver
+
     app.state.config_dispatcher = ConfigChangeDispatcher()
+    component_factory = DefaultComponentFactory(
+        available_devices=app.state.available_devices,
+        dataset_resolver=app.state.dataset_resolver,
+    )
     app.state.pipeline_manager = PipelineManager(
-        event_dispatcher=app.state.config_dispatcher, session_factory=get_session_factory()
+        event_dispatcher=app.state.config_dispatcher,
+        session_factory=session_factory,
+        component_factory=component_factory,
     )
     app.state.pipeline_manager.start()
 
@@ -87,14 +124,14 @@ fastapi_app.add_exception_handler(RequestValidationError, custom_exception_handl
 
 
 @fastapi_app.get(path="/health", tags=["Health"])
-async def health_check() -> HealthCheckSchema:
+def health_check(license_service: LicenseServiceDep) -> HealthCheckSchema:
     """Health check endpoint"""
-    return HealthCheckSchema(status="ok")
+    return HealthCheckSchema(status=HealthStatus.OK, license_accepted=license_service.is_accepted())
 
 
 fastapi_app.include_router(projects_router, prefix="/api/v1")
-fastapi_app.include_router(source_types_router, prefix="/api/v1")
-fastapi_app.include_router(webrtc_router, prefix="/api/v1")
+fastapi_app.include_router(system_router, prefix="/api/v1")
+
 
 if (
     settings.static_files_dir

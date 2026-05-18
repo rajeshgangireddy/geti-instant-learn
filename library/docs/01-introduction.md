@@ -55,14 +55,17 @@ predictions = model.predict(Sample(image_path=target_image))
 | **SoftMatcher** | Enhanced matching with soft feature comparison (Optimal Transport) |
 | **PerDino** | Personalized DINO-based prompting with DINOv2/v3 features |
 | **GroundedSAM** | Text-based visual prompting combining Grounding DINO and SAM |
+| **SAM3** | Zero-shot text/box/point prompting with open-vocabulary concepts (PyTorch) |
+| **SAM3OpenVINO** | SAM3 on OpenVINO IR models — FP16, INT8, INT4 variants for fast CPU/GPU inference |
 
 ### Foundation Models
 
 | Family | Models |
 | ------ | ------ |
-| **SAM** | SAM-HQ, SAM-HQ-tiny |
+| **SAM** | SAM-HQ-tiny, SAM-HQ-base, SAM-HQ-large, SAM-HQ |
 | **SAM 2** | SAM2-tiny, SAM2-small, SAM2-base, SAM2-large |
 | **SAM 3** | Segment Anything with Concepts (open-vocabulary) |
+| **SAM 3 OpenVINO** | Pre-exported FP16, FP32, INT8, INT4 variants for CPU/GPU inference |
 | **DINOv2** | Small, Base, Large, Giant |
 | **DINOv3** | Small, Small+, Base, Large, Huge |
 

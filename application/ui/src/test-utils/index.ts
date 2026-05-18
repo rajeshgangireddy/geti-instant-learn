@@ -7,6 +7,14 @@ export { getMockedLabel } from './mocks/mock-label';
 export { getMockedAnnotation } from './mocks/mock-annotation';
 export { getMockedProject } from './mocks/mock-project';
 export { getMockedSource } from './mocks/mock-source';
-export { getMockedModel, getMockedYoloeModel } from './mocks/mock-model';
+export {
+    getMockedModel,
+    getMockedYoloeModel,
+    getMockedMatcherModel,
+    getMockedSam3Model,
+    getMockedSupportedModels,
+} from './mocks/mock-model';
 export { getMockedImagesFolderSource } from './mocks/mock-images-folder-source';
 export { getMockedVideoFileSource } from './mocks/mock-video-file-source';
+export { getMockedSampleDatasetSource } from './mocks/mock-sample-dataset-source';
+export { clearMockedTauriContext, setMockedTauriContext } from './mocks/mock-tauri-context';
