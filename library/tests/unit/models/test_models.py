@@ -15,6 +15,7 @@ from instantlearn.models.matcher import Matcher
 from instantlearn.models.per_dino import PerDino
 from instantlearn.models.soft_matcher import SoftMatcher
 from instantlearn.models.yoloe import YOLOE
+from instantlearn.models.yoloe.config import YoloePromptMode
 
 
 class TestPerDino:
@@ -531,3 +532,70 @@ class TestYOLOE:
         assert "pred_boxes" in predictions[0]
         assert "pred_labels" in predictions[0]
         model.predict.assert_called_once_with(target_images)
+
+    @patch("ultralytics.YOLO")
+    def test_yoloe_text_prompt_mode_initialization(self, mock_yolo_cls: MagicMock) -> None:
+        """Test YOLOE with text prompt mode."""
+        mock_yolo_cls.return_value = MagicMock()
+
+        model = YOLOE(
+            model_name="yoloe-v8s-seg",
+            device="cpu",
+            prompt_mode=YoloePromptMode.TEXT,
+        )
+
+        assert model.prompt_mode == YoloePromptMode.TEXT
+        assert model._text_prompts_set is False
+
+    @patch("ultralytics.YOLO")
+    def test_yoloe_text_fit_sets_classes(self, mock_yolo_cls: MagicMock) -> None:
+        """Test that fit() in TEXT mode calls set_classes on the model."""
+        mock_yolo_instance = MagicMock()
+        mock_inner = MagicMock()
+        mock_yolo_instance.model = mock_inner
+        mock_inner.get_text_pe.return_value = MagicMock()
+        mock_yolo_cls.return_value = mock_yolo_instance
+
+        model = YOLOE(
+            model_name="yoloe-v8s-seg",
+            device="cpu",
+            prompt_mode=YoloePromptMode.TEXT,
+        )
+
+        with patch("instantlearn.models.yoloe.yoloe.Batch") as mock_batch_cls:
+            mock_batch = MagicMock()
+            mock_sample = MagicMock()
+            mock_sample.categories = ["person", "car"]
+            mock_sample.category_ids = [0, 1]
+            mock_batch.samples = [mock_sample]
+            mock_batch_cls.collate.return_value = mock_batch
+
+            model.fit(MagicMock())
+
+        assert model._text_prompts_set is True
+        mock_inner.get_text_pe.assert_called_once_with(["person", "car"])
+        mock_inner.set_classes.assert_called_once()
+
+    @patch("ultralytics.YOLO")
+    def test_yoloe_text_predict_raises_without_fit(self, mock_yolo_cls: MagicMock) -> None:
+        """Test that predict() in TEXT mode raises RuntimeError if fit() was not called."""
+        mock_yolo_cls.return_value = MagicMock()
+
+        model = YOLOE(
+            model_name="yoloe-v8s-seg",
+            device="cpu",
+            prompt_mode=YoloePromptMode.TEXT,
+        )
+
+        with pytest.raises(RuntimeError, match="No text prompts set"):
+            model.predict([Image(torch.zeros((3, 224, 224), dtype=torch.uint8))])
+
+    @patch("ultralytics.YOLO")
+    def test_yoloe_export_raises_not_implemented(self, mock_yolo_cls: MagicMock) -> None:
+        """Test that export() raises NotImplementedError."""
+        mock_yolo_cls.return_value = MagicMock()
+
+        model = YOLOE(model_name="yoloe-v8s-seg", device="cpu")
+
+        with pytest.raises(NotImplementedError, match="Direct export is not supported"):
+            model.export()

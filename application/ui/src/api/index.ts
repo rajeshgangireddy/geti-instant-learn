@@ -37,14 +37,12 @@ export type { SchemaSupportedPromptType as SupportedPromptType } from './openapi
 type MatcherConfig = components['schemas']['MatcherConfig'];
 type PerDINOConfig = components['schemas']['PerDinoConfig'];
 type SoftMatcherConfig = components['schemas']['SoftMatcherConfig'];
-type YoloeConfig = components['schemas']['YoloeConfig'];
 type Sam3Config = components['schemas']['Sam3Config'];
 
 export type ModelType = components['schemas']['ProcessorSchema'];
 export type MatcherModel = Omit<ModelType, 'config'> & { config: MatcherConfig };
 export type PerDINOModel = Omit<ModelType, 'config'> & { config: PerDINOConfig };
 export type SoftMatcherModel = Omit<ModelType, 'config'> & { config: SoftMatcherConfig };
-export type YoloeModel = Omit<ModelType, 'config'> & { config: YoloeConfig };
 export type Sam3Model = Omit<ModelType, 'config'> & { config: Sam3Config };
 
 export { $api, client } from './client';

@@ -19,8 +19,6 @@ class ModelType(StrEnum):
     MATCHER = "matcher"
     PERDINO = "perdino"
     SOFT_MATCHER = "soft_matcher"
-    YOLOE = "yoloe"
-    YOLOE_OPENVINO = "yoloe_openvino"
     SAM3 = "sam3"
 
 
@@ -160,81 +158,6 @@ class SoftMatcherConfig(BaseModelConfig):
     }
 
 
-YOLOE_MODEL_NAMES = (
-    "yoloe-v8s-seg",
-    "yoloe-v8m-seg",
-    "yoloe-v8l-seg",
-    "yoloe-11s-seg",
-    "yoloe-11m-seg",
-    "yoloe-11l-seg",
-    "yoloe-26n-seg",
-    "yoloe-26s-seg",
-    "yoloe-26m-seg",
-    "yoloe-26l-seg",
-    "yoloe-26x-seg",
-)
-
-
-class YoloeConfig(BaseModel):
-    """Configuration for YOLOE model.
-
-    YOLOE is an end-to-end detection/segmentation model that does not
-    require a separate encoder or SAM decoder pipeline.
-    """
-
-    model_type: Literal[ModelType.YOLOE] = ModelType.YOLOE
-    model_name: str = Field(default="yoloe-v8s-seg", description="YOLOE model variant")
-    confidence_threshold: float = Field(default=0.25, gt=0.0, lt=1.0)
-    iou_threshold: float = Field(default=0.7, gt=0.0, lt=1.0)
-    imgsz: int = Field(default=640, gt=0, description="Input image size")
-    use_nms: bool = Field(default=True)
-    precision: str = Field(default="fp16", description="Model precision")
-
-    @field_validator("model_name")
-    @classmethod
-    def validate_model_name(cls, v: str) -> str:
-        if v not in YOLOE_MODEL_NAMES:
-            raise ValueError(f"Supported YOLOE model must be one of {list(YOLOE_MODEL_NAMES)}, got '{v}'")
-        return v
-
-    model_config = {
-        "json_schema_extra": {
-            "example": {
-                "model_type": "yoloe",
-                "model_name": "yoloe-v8s-seg",
-                "confidence_threshold": 0.25,
-                "iou_threshold": 0.7,
-                "imgsz": 640,
-                "use_nms": True,
-                "precision": "fp16",
-            }
-        }
-    }
-
-
-class YoloeOpenvinoConfig(BaseModel):
-    """Configuration for YOLOE OpenVINO model.
-
-    Runs inference on a pre-exported OpenVINO IR where target classes
-    were baked in at export time.
-    """
-
-    model_type: Literal[ModelType.YOLOE_OPENVINO] = ModelType.YOLOE_OPENVINO
-    model_dir: str = Field(description="Path to the exported OpenVINO model directory")
-    confidence_threshold: float = Field(default=0.25, gt=0.0, lt=1.0)
-    iou_threshold: float = Field(default=0.7, gt=0.0, lt=1.0)
-
-    model_config = {
-        "json_schema_extra": {
-            "example": {
-                "model_type": "yoloe_openvino",
-                "model_dir": "exports/yoloe_openvino",
-                "confidence_threshold": 0.25,
-                "iou_threshold": 0.7,
-            }
-        }
-    }
-
 
 class Sam3Config(BaseModel):
     """
@@ -260,7 +183,7 @@ class Sam3Config(BaseModel):
 
 
 ModelConfig = Annotated[
-    PerDinoConfig | MatcherConfig | SoftMatcherConfig | YoloeConfig | YoloeOpenvinoConfig | Sam3Config,
+    PerDinoConfig | MatcherConfig | SoftMatcherConfig | Sam3Config,
     Field(discriminator="model_type"),
 ]
 

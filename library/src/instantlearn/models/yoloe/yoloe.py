@@ -18,14 +18,16 @@ import numpy as np
 import torch
 
 from instantlearn.data.base.batch import Batch, Collatable
-from instantlearn.data.base.sample import Sample
 from instantlearn.models.base import Model
+from instantlearn.models.yoloe.config import YoloePostProcessingConfig, YoloePromptMode
 from instantlearn.utils.constants import Backend
 
 if TYPE_CHECKING:
-    from ultralytics import YOLO as UltralyticsYOLO
-    from ultralytics.engine.results import Results as UltralyticsResults
+    from ultralytics import YOLO as UltralyticsYOLO  # noqa: N811
     from ultralytics.engine.predictor import BasePredictor
+    from ultralytics.engine.results import Results as UltralyticsResults
+
+    from instantlearn.data.base.sample import Sample
 
 logger = logging.getLogger(__name__)
 
@@ -47,35 +49,30 @@ YOLOE_MODELS: dict[str, str] = {
 class YOLOE(Model):
     """YOLOE model for open-vocabulary detection and instance segmentation.
 
-    End-to-end model that supports visual prompting for zero/few-shot
-    object detection and segmentation. Unlike Matcher/PerDINO, YOLOE
-    does not require a separate encoder + SAM decoder pipeline.
+    End-to-end model that supports both text and visual prompting for
+    zero/few-shot object detection and segmentation. Unlike Matcher/PerDINO,
+    YOLOE does not require a separate encoder + SAM decoder pipeline.
+
+    Prompt Modes:
+        - TEXT: Text-based class prompting via CLIP embeddings.
+          Categories are extracted from reference samples and fused
+          into the model weights via ``set_classes``.
+        - VISUAL_EXEMPLAR: Visual prompting using bounding boxes
+          extracted from reference masks.
 
     Examples:
+        Visual prompting (default):
+
         >>> from instantlearn.models import YOLOE
-        >>> from instantlearn.data.base.sample import Sample
-        >>> import torch
-        >>> import numpy as np
-
         >>> model = YOLOE(model_name="yoloe-v8s-seg")
-
-        >>> # Create reference sample
-        >>> ref_sample = Sample(
-        ...     image=torch.zeros((3, 640, 640)),
-        ...     masks=torch.ones(30, 30, dtype=torch.bool).unsqueeze(0),
-        ...     category_ids=np.array([1]),
-        ...     is_reference=[True],
-        ...     categories=["object"],
-        ... )
-
-        >>> # Create target sample
-        >>> target_sample = Sample(
-        ...     image=torch.zeros((3, 640, 640)),
-        ...     is_reference=[False],
-        ...     categories=["object"],
-        ... )
-
         >>> model.fit(ref_sample)
+        >>> results = model.predict(target_sample)
+
+        Text prompting:
+
+        >>> from instantlearn.models.yoloe.config import YoloePromptMode
+        >>> model = YOLOE(model_name="yoloe-v8s-seg", prompt_mode=YoloePromptMode.TEXT)
+        >>> model.fit(ref_sample)  # categories extracted from sample
         >>> results = model.predict(target_sample)
     """
 
@@ -88,6 +85,8 @@ class YOLOE(Model):
         use_nms: bool = True,
         precision: str = "fp16",
         device: str = "cuda",
+        prompt_mode: str | YoloePromptMode = YoloePromptMode.VISUAL_EXEMPLAR,
+        post_processing: YoloePostProcessingConfig | None = None,
     ) -> None:
         """Initialize the YOLOE model.
 
@@ -99,6 +98,12 @@ class YOLOE(Model):
             use_nms: Whether to apply non-maximum suppression.
             precision: Model precision ("fp16", "fp32", "bf16").
             device: Device for inference ("cuda", "cpu").
+            prompt_mode: Prompting strategy — "text" or "visual_exemplar".
+            post_processing: Optional PostProcessingConfig (overrides
+                confidence_threshold/iou_threshold/use_nms if provided).
+
+        Raises:
+            ValueError: If model_name is not a known YOLOE model.
         """
         super().__init__()
 
@@ -108,25 +113,52 @@ class YOLOE(Model):
             raise ValueError(msg)
 
         self.model_name = model_name
-        self.confidence_threshold = confidence_threshold
-        self.iou_threshold = iou_threshold
         self.imgsz = imgsz
-        self.use_nms = use_nms
         self.precision = precision
         self.device_name = device
+        self.prompt_mode = YoloePromptMode(prompt_mode)
+
+        # Post-processing config (flat params used as defaults)
+        if post_processing is not None:
+            self.post_processing = post_processing
+        else:
+            self.post_processing = YoloePostProcessingConfig(
+                confidence_threshold=confidence_threshold,
+                iou_threshold=iou_threshold,
+                use_nms=use_nms,
+            )
 
         self._model = self._load_model()
         self._predictor_cls = self._get_predictor_cls()
+
+        # State populated by fit()
         self._visual_prompts_set = False
+        self._text_prompts_set = False
+        self._category_mapping: dict[str, int] = {}
+
+    @property
+    def confidence_threshold(self) -> float:
+        """Minimum confidence score for detections."""
+        return self.post_processing.confidence_threshold
+
+    @property
+    def iou_threshold(self) -> float:
+        """IoU threshold for non-maximum suppression."""
+        return self.post_processing.iou_threshold
+
+    @property
+    def use_nms(self) -> bool:
+        """Whether to apply non-maximum suppression."""
+        return self.post_processing.use_nms
 
     def _load_model(self) -> UltralyticsYOLO:
         """Load the YOLOE model from ultralytics.
 
-        Returns:
-            Loaded YOLO model instance.
+        Raises:
+            ImportError: If ultralytics is not installed.
         """
         try:
-            from ultralytics import YOLO
+            from ultralytics import YOLO  # noqa: PLC0415
 
             logging.getLogger("ultralytics").setLevel(logging.WARNING)
         except ImportError as e:
@@ -136,7 +168,7 @@ class YOLOE(Model):
             )
             raise ImportError(msg) from e
 
-        from instantlearn.models.yoloe.weights import get_weights_path
+        from instantlearn.models.yoloe.weights import get_weights_path  # noqa: PLC0415
 
         model_file = YOLOE_MODELS[self.model_name]
         model_path = get_weights_path(model_file)
@@ -147,15 +179,8 @@ class YOLOE(Model):
         return model
 
     def _get_predictor_cls(self) -> type[BasePredictor]:
-        """Return the correct YOLOE visual-prompt predictor class.
-
-        Uses ``YOLOEVPSegPredictor`` for segmentation model variants
-        and ``YOLOEVPDetectPredictor`` for detection-only variants.
-
-        Returns:
-            Predictor class appropriate for the loaded model.
-        """
-        from ultralytics.models.yolo.yoloe.predict import (
+        """Return the correct YOLOE visual-prompt predictor class."""
+        from ultralytics.models.yolo.yoloe.predict import (  # noqa: PLC0415
             YOLOEVPDetectPredictor,
             YOLOEVPSegPredictor,
         )
@@ -166,14 +191,7 @@ class YOLOE(Model):
 
     @staticmethod
     def _image_to_numpy(image: torch.Tensor) -> np.ndarray:
-        """Convert a CHW torch image tensor to an HWC uint8 numpy array.
-
-        Args:
-            image: Image tensor of shape [3, H, W].
-
-        Returns:
-            Numpy array of shape [H, W, 3] with dtype uint8.
-        """
+        """Convert a CHW torch image tensor to an HWC uint8 numpy array."""
         img_np = image.permute(1, 2, 0).cpu().numpy()
         if img_np.dtype != np.uint8:
             img_np = (
@@ -182,6 +200,75 @@ class YOLOE(Model):
                 else img_np.astype(np.uint8)
             )
         return img_np
+
+    # ------------------------------------------------------------------
+    # fit() dispatch
+    # ------------------------------------------------------------------
+    def fit(self, reference: Sample | list[Sample] | Batch) -> None:
+        """Learn from reference images.
+
+        Dispatches to ``_fit_text`` or ``_fit_visual_exemplar`` depending
+        on ``prompt_mode``.
+
+        Args:
+            reference: Reference data to learn from.
+        """
+        reference_batch = Batch.collate(reference)
+
+        if self.prompt_mode == YoloePromptMode.TEXT:
+            self._fit_text(reference_batch)
+        else:
+            self._fit_visual_exemplar(reference_batch)
+
+    def _fit_text(self, reference_batch: Batch) -> None:
+        """Extract category names and fuse text embeddings into model.
+
+        Uses ultralytics ``get_text_pe()`` + ``set_classes()`` to bake
+        CLIP text embeddings into the classification head weights.
+        """
+        # Collect unique category names from reference
+        categories: list[str] = []
+        category_id_to_name: dict[int, str] = {}
+
+        for sample in reference_batch.samples:
+            if sample.categories is None:
+                continue
+            cat_ids = sample.category_ids
+            if cat_ids is None:
+                cat_ids = list(range(len(sample.categories)))
+            for cat_name, cat_id in zip(sample.categories, cat_ids, strict=True):
+                cid = int(cat_id)
+                if cid not in category_id_to_name:
+                    category_id_to_name[cid] = cat_name
+
+        # Sort by ID for deterministic ordering
+        sorted_ids = sorted(category_id_to_name.keys())
+        categories = [category_id_to_name[cid] for cid in sorted_ids]
+        self._category_mapping = {name: idx for idx, name in enumerate(categories)}
+
+        if not categories:
+            logger.warning("No categories found in reference data for text prompting.")
+            return
+
+        # Get CLIP text embeddings and fuse into model
+        inner = self._model.model
+        text_pe = inner.get_text_pe(categories)
+        inner.set_classes(categories, text_pe)
+
+        self._text_prompts_set = True
+        logger.info(
+            "Text prompts set with %d categories: %s",
+            len(categories),
+            categories,
+        )
+
+    def _fit_visual_exemplar(self, reference_batch: Batch) -> None:
+        """Extract bounding boxes from reference masks for visual prompting."""
+        self._prepare_visual_prompts(
+            images=reference_batch.images,
+            masks=reference_batch.masks,
+            category_ids=reference_batch.category_ids,
+        )
 
     def _prepare_visual_prompts(
         self,
@@ -192,24 +279,17 @@ class YOLOE(Model):
         """Prepare and store visual prompts from reference data.
 
         Extracts bounding boxes from masks and builds the
-        ``visual_prompts`` dict expected by the ultralytics YOLOE
-        ``predict()`` API.  Only the **first** reference image is
-        used as ``refer_image`` (ultralytics limitation).
-
-        Args:
-            images: Reference images, each of shape [3, H, W].
-            masks: Reference masks, each of shape [N, H, W] (or None).
-            category_ids: Integer category ID tensors aligned with masks.
+        ``visual_prompts`` dict expected by the ultralytics YOLOE API.
         """
         all_bboxes: list[list[float]] = []
         all_cls: list[int] = []
 
-        for mask_set, cat_ids in zip(masks, category_ids):
+        for mask_set, cat_ids in zip(masks, category_ids, strict=True):
             if mask_set is None:
                 continue
 
             if mask_set.dim() == 2:
-                mask_set = mask_set.unsqueeze(0)
+                mask_set = mask_set.unsqueeze(0)  # noqa: PLW2901
 
             cat_ids_tensor = (
                 torch.atleast_1d(cat_ids)
@@ -217,7 +297,7 @@ class YOLOE(Model):
                 else torch.atleast_1d(torch.tensor(cat_ids))
             )
 
-            for mask, cat_id in zip(mask_set, cat_ids_tensor):
+            for mask, cat_id in zip(mask_set, cat_ids_tensor, strict=True):
                 ys, xs = torch.where(mask > 0)
                 if len(ys) == 0:
                     continue
@@ -230,7 +310,6 @@ class YOLOE(Model):
             logger.warning("No valid bounding boxes extracted from reference masks.")
             return
 
-        # Store for use in predict()
         self._refer_image = self._image_to_numpy(images[0])
         self._visual_prompts: dict[str, list] = {
             "bboxes": all_bboxes,
@@ -244,39 +323,62 @@ class YOLOE(Model):
             len(images),
         )
 
-    def fit(self, reference: Sample | list[Sample] | Batch) -> None:
-        """Learn from reference images by setting visual prompts.
-
-        Args:
-            reference: Reference data to learn from. Accepts:
-                - Sample: A single reference sample
-                - list[Sample]: A list of reference samples
-                - Batch: A batch of reference samples
-        """
-        reference_batch = Batch.collate(reference)
-
-        self._prepare_visual_prompts(
-            images=reference_batch.images,
-            masks=reference_batch.masks,
-            category_ids=reference_batch.category_ids,
-        )
-
+    # ------------------------------------------------------------------
+    # predict() dispatch
+    # ------------------------------------------------------------------
     def predict(self, target: Collatable) -> list[dict[str, torch.Tensor]]:
-        """Detect objects in target images using visual prompts.
+        """Detect objects in target images.
+
+        Dispatches to ``_predict_text`` or ``_predict_visual_exemplar``
+        depending on ``prompt_mode``.
 
         Args:
-            target: Target data to infer. Accepts:
-                - Sample: A single target sample
-                - list[Sample]: A list of target samples
-                - Batch: A batch of target samples
-                - str | Path: A single image path
-                - list[str] | list[Path]: Multiple image paths
+            target: Target data to infer.
 
         Returns:
             List of predictions per image, each containing:
                 "pred_masks": [num_masks, H, W]
                 "pred_boxes": [num_boxes, 5] with [x1, y1, x2, y2, score]
                 "pred_labels": [num_masks] - category IDs
+
+        """
+        if self.prompt_mode == YoloePromptMode.TEXT:
+            return self._predict_text(target)
+        return self._predict_visual_exemplar(target)
+
+    def _predict_text(self, target: Collatable) -> list[dict[str, torch.Tensor]]:
+        """Predict using text-prompted model (classes fused into weights).
+
+        Raises:
+            RuntimeError: If fit() has not been called before predict().
+        """
+        if not self._text_prompts_set:
+            msg = "No text prompts set. Call fit() first."
+            raise RuntimeError(msg)
+
+        target_batch = Batch.collate(target)
+        all_results = []
+
+        for image in target_batch.images:
+            img_np = self._image_to_numpy(image)
+
+            results = self._model.predict(
+                source=img_np,
+                conf=self.confidence_threshold,
+                iou=self.iou_threshold,
+                imgsz=self.imgsz,
+                device=self.device_name,
+                verbose=False,
+            )
+
+            result = results[0] if results else None
+            prediction = self._parse_result(result, image.shape[-2:])
+            all_results.append(prediction)
+
+        return all_results
+
+    def _predict_visual_exemplar(self, target: Collatable) -> list[dict[str, torch.Tensor]]:
+        """Predict using visual prompts (bounding boxes from reference).
 
         Raises:
             RuntimeError: If fit() has not been called before predict().
@@ -309,20 +411,12 @@ class YOLOE(Model):
 
         return all_results
 
+    @staticmethod
     def _parse_result(
-        self,
         result: UltralyticsResults | None,
         original_size: tuple[int, int],
     ) -> dict[str, torch.Tensor]:
-        """Parse ultralytics result into the standard prediction format.
-
-        Args:
-            result: Ultralytics detection result.
-            original_size: Original image size (H, W).
-
-        Returns:
-            Dictionary with pred_masks, pred_boxes, and pred_labels.
-        """
+        """Parse ultralytics result into the standard prediction format."""
         if result is None or result.boxes is None or len(result.boxes) == 0:
             h, w = original_size
             return {
@@ -359,52 +453,21 @@ class YOLOE(Model):
             "pred_labels": pred_labels,
         }
 
-    @torch.no_grad()
     def export(
         self,
         export_dir: str | Path = Path("./exports/yoloe"),
-        backend: str | Backend = Backend.ONNX,
-        **kwargs,
+        backend: str | Backend = Backend.OPENVINO,
+        **kwargs: object,
     ) -> Path:
-        """Export YOLOE model.
+        """Export is not supported directly on the model class.
 
-        Args:
-            export_dir: Directory to save exported model.
-            backend: Export backend (ONNX, OpenVINO).
-            **kwargs: Additional export parameters.
-
-        Returns:
-            Path to the exported model file.
+        Use the export scripts in ``instantlearn.scripts.yoloe`` instead.
 
         Raises:
-            ImportError: If OpenVINO is requested but not installed.
+            NotImplementedError: Always raised.
         """
-        export_path = Path(export_dir)
-        export_path.mkdir(parents=True, exist_ok=True)
-
-        if backend == Backend.ONNX:
-            result = self._model.export(
-                format="onnx",
-                imgsz=self.imgsz,
-                half=self.precision == "fp16",
-                simplify=True,
-            )
-            onnx_path = Path(result)
-            target = export_path / "yoloe.onnx"
-            onnx_path.rename(target)
-            return target
-
-        if backend == Backend.OPENVINO:
-            try:
-                result = self._model.export(
-                    format="openvino",
-                    imgsz=self.imgsz,
-                    half=self.precision == "fp16",
-                )
-                ov_path = Path(result)
-                return ov_path
-            except ImportError as e:
-                msg = "OpenVINO is not installed. Install it to use OpenVINO export."
-                raise ImportError(msg) from e
-
-        return export_path
+        msg = (
+            "Direct export is not supported. Use the export scripts: "
+            "instantlearn.scripts.yoloe.export_yoloe_openvino"
+        )
+        raise NotImplementedError(msg)

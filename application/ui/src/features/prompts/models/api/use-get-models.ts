@@ -30,8 +30,6 @@ const MODEL_TYPE_DISPLAY_NAMES: Record<ModelType['config']['model_type'], string
     perdino: 'PerDINO',
     soft_matcher: 'SoftMatcher',
     sam3: 'SAM3',
-    yoloe: 'YOLOE',
-    yoloe_openvino: 'YOLOE OpenVINO',
 };
 
 const toProjectModel = (meta: SupportedModelMetadata, index: number): ModelType => ({

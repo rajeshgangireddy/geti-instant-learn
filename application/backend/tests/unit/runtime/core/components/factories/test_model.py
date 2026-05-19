@@ -13,7 +13,6 @@ from domain.services.schemas.processor import (
     MatcherConfig,
     PerDinoConfig,
     SoftMatcherConfig,
-    YoloeConfig,
 )
 from runtime.core.components.factories.model import DeviceResolver, ModelFactory
 from runtime.core.components.models.passthrough_model import PassThroughModelHandler
@@ -295,42 +294,6 @@ class TestModelFactory:
             )
             mock_handler.assert_called_once_with(mock_model_instance, mock_reference_batch)
 
-    def test_factory_creates_yoloe_model_with_config(self, mock_reference_batch, mock_settings, model_factory):
-        config = YoloeConfig(
-            model_name="yoloe-v8s-seg",
-            confidence_threshold=0.25,
-            iou_threshold=0.7,
-            imgsz=640,
-            use_nms=True,
-            precision="fp16",
-        )
-
-        with patch.multiple(
-            "runtime.core.components.factories.model",
-            get_settings=DEFAULT,
-            YOLOE=DEFAULT,
-            TorchModelHandler=DEFAULT,
-        ) as mocks:
-            mocks["get_settings"].return_value = mock_settings
-            mock_yoloe = mocks["YOLOE"]
-            mock_handler = mocks["TorchModelHandler"]
-
-            mock_model_instance = MagicMock()
-            mock_yoloe.return_value = mock_model_instance
-
-            model_factory.create(mock_reference_batch, config)
-
-            mock_yoloe.assert_called_once_with(
-                model_name="yoloe-v8s-seg",
-                confidence_threshold=0.25,
-                iou_threshold=0.7,
-                imgsz=640,
-                use_nms=True,
-                precision="fp16",
-                device="cpu",
-            )
-            mock_handler.assert_called_once_with(mock_model_instance, mock_reference_batch)
-
     def test_factory_returns_passthrough_for_none_reference_batch(self, model_factory):
         config = MatcherConfig(
             num_foreground_points=5,
@@ -398,7 +361,6 @@ class TestModelFactory:
             (MatcherConfig, "Matcher"),
             (PerDinoConfig, "PerDino"),
             (SoftMatcherConfig, "SoftMatcher"),
-            (YoloeConfig, "YOLOE"),
         ],
     )
     def test_factory_returns_inference_handler_for_valid_configs(
@@ -419,13 +381,6 @@ class TestModelFactory:
                 num_background_points=2,
                 sam_model=SAMModelName.SAM_HQ_TINY,
                 encoder_model="dinov3_large",
-            )
-        elif config_class == YoloeConfig:
-            config = YoloeConfig(
-                model_name="yoloe-v8s-seg",
-                confidence_threshold=0.25,
-                iou_threshold=0.7,
-                imgsz=640,
             )
         else:
             config = SoftMatcherConfig(

@@ -12,7 +12,6 @@ from domain.services.schemas.processor import (
     SoftMatcherConfig,
     SupportedModelMetadataSchema,
     SupportedPromptType,
-    YoloeConfig,
 )
 
 PROMPT_TYPE_TO_ANNOTATION_TYPE: dict[SupportedPromptType, AnnotationType] = {
@@ -35,10 +34,6 @@ _SUPPORTED_MODELS_METADATA: dict[ModelType, SupportedModelMetadataSchema] = {
     ModelType.SAM3: SupportedModelMetadataSchema(
         default_config=Sam3Config(),
         supported_prompt_types=[SupportedPromptType.TEXT, SupportedPromptType.VISUAL_RECTANGLE],
-    ),
-    ModelType.YOLOE: SupportedModelMetadataSchema(
-        default_config=YoloeConfig(),
-        supported_prompt_types=[SupportedPromptType.VISUAL_POLYGON, SupportedPromptType.VISUAL_RECTANGLE],
     ),
 }
 

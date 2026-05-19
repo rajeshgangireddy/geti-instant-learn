@@ -8,7 +8,6 @@ from instantlearn.models.matcher import Matcher
 from instantlearn.models.per_dino import PerDino
 from instantlearn.models.sam3 import SAM3, Sam3PromptMode
 from instantlearn.models.soft_matcher import SoftMatcher
-from instantlearn.models.yoloe import YOLOE, YOLOEOpenVINO
 
 from domain.services.schemas.device import AvailableDeviceSchema, Device
 from domain.services.schemas.processor import (
@@ -17,8 +16,6 @@ from domain.services.schemas.processor import (
     PerDinoConfig,
     Sam3Config,
     SoftMatcherConfig,
-    YoloeConfig,
-    YoloeOpenvinoConfig,
 )
 from runtime.core.components.base import ModelHandler
 from runtime.core.components.models.openvino_model import OpenVINOModelHandler
@@ -145,29 +142,6 @@ class ModelFactory:
                     device=selected_device,
                 )
                 logger.info("Using the Torch backend for SoftMatcher")
-                return TorchModelHandler(model, reference_batch)
-            case YoloeConfig() as config:
-                logger.info("Initializing a YOLOE instance")
-                model = YOLOE(
-                    model_name=config.model_name,
-                    confidence_threshold=config.confidence_threshold,
-                    iou_threshold=config.iou_threshold,
-                    imgsz=config.imgsz,
-                    use_nms=config.use_nms,
-                    precision=config.precision,
-                    device=selected_device,
-                )
-                logger.info("Using the Torch backend for YOLOE")
-                return TorchModelHandler(model, reference_batch)
-            case YoloeOpenvinoConfig() as config:
-                logger.info("Initializing a YOLOE OpenVINO instance")
-                model = YOLOEOpenVINO(
-                    model_dir=config.model_dir,
-                    confidence_threshold=config.confidence_threshold,
-                    iou_threshold=config.iou_threshold,
-                    device=selected_device,
-                )
-                logger.info("Using the Torch backend for YOLOE OpenVINO")
                 return TorchModelHandler(model, reference_batch)
             case Sam3Config() as config:
                 logger.info("Initializing a SAM3 instance")

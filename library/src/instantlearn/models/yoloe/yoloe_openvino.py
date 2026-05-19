@@ -21,15 +21,15 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 import yaml
 
 from instantlearn.data.base.batch import Batch, Collatable
-from instantlearn.data.base.sample import Sample
 from instantlearn.models.base import Model
+from instantlearn.models.yoloe.config import YoloeOVVariant, YoloePostProcessingConfig
 from instantlearn.models.yoloe.postprocessing import (
     parse_detections,
     preprocess_image,
@@ -38,6 +38,9 @@ from instantlearn.models.yoloe.postprocessing import (
 )
 from instantlearn.utils.constants import Backend
 from instantlearn.utils.utils import device_to_openvino_device
+
+if TYPE_CHECKING:
+    from instantlearn.data.base.sample import Sample
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +61,8 @@ class YOLOEOpenVINO(Model):
         confidence_threshold: Minimum detection confidence.
         iou_threshold: IoU threshold (unused — model is end2end).
         device: Inference device (``"cpu"``, ``"cuda"``/``"GPU"``, ``"AUTO"``).
+        variant: Model variant indicating compression level used at export.
+        post_processing: Optional PostProcessingConfig (overrides flat params).
 
     Examples:
         >>> from instantlearn.models.yoloe import YOLOEOpenVINO
@@ -72,13 +77,34 @@ class YOLOEOpenVINO(Model):
         confidence_threshold: float = 0.25,
         iou_threshold: float = 0.7,
         device: str = "cpu",
+        variant: str | YoloeOVVariant = YoloeOVVariant.FP16,
+        post_processing: YoloePostProcessingConfig | None = None,
     ) -> None:
+        """Initialize YOLOE OpenVINO model.
+
+        Args:
+            model_dir: Path to the exported OpenVINO IR directory.
+            confidence_threshold: Minimum confidence score for detections.
+            iou_threshold: IoU threshold for non-maximum suppression.
+            device: Device for inference ("cpu", "gpu").
+            variant: Model quantization variant.
+            post_processing: Optional PostProcessingConfig (overrides
+                confidence_threshold/iou_threshold if provided).
+        """
         super().__init__()
 
         self.model_dir = Path(model_dir)
-        self.confidence_threshold = confidence_threshold
-        self.iou_threshold = iou_threshold
         self.device_name = device
+        self.variant = YoloeOVVariant(variant)
+
+        # Post-processing config
+        if post_processing is not None:
+            self.post_processing = post_processing
+        else:
+            self.post_processing = YoloePostProcessingConfig(
+                confidence_threshold=confidence_threshold,
+                iou_threshold=iou_threshold,
+            )
 
         # Loaded at _load_model
         self._compiled_model = None
@@ -93,12 +119,26 @@ class YOLOEOpenVINO(Model):
         # Set after fit()
         self._category_id_map: dict[int, int] | None = None
 
+    @property
+    def confidence_threshold(self) -> float:
+        """Minimum confidence score for detections."""
+        return self.post_processing.confidence_threshold
+
+    @property
+    def iou_threshold(self) -> float:
+        """IoU threshold for non-maximum suppression."""
+        return self.post_processing.iou_threshold
+
     # ------------------------------------------------------------------
     # Model loading
     # ------------------------------------------------------------------
     def _load_model(self) -> None:
-        """Load the OpenVINO IR model and parse metadata."""
-        import openvino as ov
+        """Load the OpenVINO IR model and parse metadata.
+
+        Raises:
+            FileNotFoundError: If no .xml file is found in model_dir.
+        """
+        import openvino as ov  # noqa: PLC0415
 
         xml_files = list(self.model_dir.glob("*.xml"))
         if not xml_files:
@@ -112,7 +152,20 @@ class YOLOEOpenVINO(Model):
         model = core.read_model(str(xml_path))
 
         ov_device = device_to_openvino_device(self.device_name)
-        self._compiled_model = core.compile_model(model, ov_device)
+
+        # GPU optimizations (aligned with SAM3OpenVINO)
+        compile_props: dict[str, str] = {}
+        if ov_device != "CPU":
+            compile_props["PERFORMANCE_HINT"] = "LATENCY"
+
+        # Enable model caching for GPU (faster subsequent loads)
+        cache_dir = self.model_dir / ".ov_cache"
+        if ov_device != "CPU":
+            core.set_property({"CACHE_DIR": str(cache_dir)})
+
+        self._compiled_model = core.compile_model(model, ov_device, compile_props)
+
+        # Pre-create infer request (avoid per-call allocation on GPU)
         self._infer_request = self._compiled_model.create_infer_request()
 
         # Parse metadata
@@ -121,7 +174,6 @@ class YOLOEOpenVINO(Model):
             with meta_path.open() as f:
                 self._metadata = yaml.safe_load(f) or {}
         else:
-            # Try JSON fallback
             meta_json = self.model_dir / "metadata.json"
             if meta_json.exists():
                 with meta_json.open() as f:
@@ -139,22 +191,22 @@ class YOLOEOpenVINO(Model):
         # Determine nm from output shape
         output0_shape = self._compiled_model.output(0).partial_shape
         if len(output0_shape) == 3:
-            # [1, num_dets, 4+1+1+nm]
             total_cols = output0_shape[2].get_length()
             self._nm = total_cols - 6  # subtract box(4) + score(1) + class(1)
         else:
             self._nm = _DEFAULT_NM
 
         logger.info(
-            "YOLOE OpenVINO model loaded: imgsz=%s, names=%s, nm=%d, device=%s",
+            "YOLOE OpenVINO model loaded: imgsz=%s, names=%s, nm=%d, device=%s, variant=%s",
             self._imgsz,
             self._names,
             self._nm,
             ov_device,
+            self.variant.value,
         )
 
     # ------------------------------------------------------------------
-    # fit / predict / export
+    # fit / predict
     # ------------------------------------------------------------------
     def fit(self, reference: Sample | list[Sample] | Batch) -> None:
         """Record category mapping from reference data.
@@ -168,10 +220,6 @@ class YOLOEOpenVINO(Model):
         """
         reference_batch = Batch.collate(reference)
 
-        # Build map from model's internal class index → pipeline category ID.
-        # The model's internal class indices follow the order provided
-        # during ``set_classes()`` at export time (0, 1, 2, ...).
-        # If reference data provides explicit category_ids, map them.
         category_id_map: dict[int, int] = {}
 
         for cat_ids in reference_batch.category_ids:
@@ -183,11 +231,10 @@ class YOLOEOpenVINO(Model):
                 else [cat_ids]
             )
             for cid in ids:
-                cid_int = int(cid) if isinstance(cid, (torch.Tensor, np.integer)) else int(cid)
-                # Identity mapping: model class idx == pipeline category ID
+                cid_int = int(cid)
                 category_id_map[cid_int] = cid_int
 
-        self._category_id_map = category_id_map if category_id_map else None
+        self._category_id_map = category_id_map or None
 
         logger.info(
             "YOLOE OpenVINO fit: recorded %d category IDs",
@@ -198,10 +245,7 @@ class YOLOEOpenVINO(Model):
         """Run inference on target images.
 
         Args:
-            target: Target data to infer. Accepts:
-                - Sample: A single target sample
-                - list[Sample]: A list of target samples
-                - Batch: A batch of target samples
+            target: Target data to infer.
 
         Returns:
             List of predictions per image, each containing:
@@ -219,14 +263,7 @@ class YOLOEOpenVINO(Model):
         return all_results
 
     def _infer_single(self, image: torch.Tensor) -> dict[str, torch.Tensor]:
-        """Run inference on a single image tensor.
-
-        Args:
-            image: Image tensor [3, H, W] (float or uint8).
-
-        Returns:
-            Prediction dictionary.
-        """
+        """Run inference on a single image tensor."""
         # Convert to HWC numpy
         img_np = image.permute(1, 2, 0).cpu().numpy()
         if img_np.dtype != np.uint8:
@@ -242,7 +279,7 @@ class YOLOEOpenVINO(Model):
         # Preprocess
         input_tensor, scale, pad = preprocess_image(img_np, self._imgsz)
 
-        # Inference
+        # Inference (reuse pre-created request)
         self._infer_request.infer({0: input_tensor})
         det_output = self._infer_request.get_output_tensor(0).data.copy()
         proto_output = self._infer_request.get_output_tensor(1).data.copy()
@@ -283,8 +320,8 @@ class YOLOEOpenVINO(Model):
 
         # Build output tensors
         pred_boxes = np.concatenate(
-            [boxes_orig, scores[:, None]], axis=1
-        )  # [N, 5]
+            [boxes_orig, scores[:, None]], axis=1,
+        )
 
         return {
             "pred_masks": torch.from_numpy(masks),
@@ -292,22 +329,13 @@ class YOLOEOpenVINO(Model):
             "pred_labels": torch.from_numpy(class_ids).long(),
         }
 
-    @torch.no_grad()
     def export(
         self,
-        export_dir: str | Path = Path("./exports/yoloe_openvino"),
-        backend: str | Backend = Backend.OPENVINO,
-        **kwargs,
+        export_dir: str | Path = Path("./exports/yoloe_openvino"),  # noqa: ARG002
+        backend: str | Backend = Backend.OPENVINO,  # noqa: ARG002
+        **kwargs: object,  # noqa: ARG002
     ) -> Path:
-        """Return the path to the model directory.
-
-        Since this model already *is* an OpenVINO IR, export simply
-        returns the model directory.
-
-        Args:
-            export_dir: Unused (model is already exported).
-            backend: Expected to be OPENVINO.
-            **kwargs: Ignored.
+        """Export is not applicable — model is already an OpenVINO IR.
 
         Returns:
             Path to the model directory.

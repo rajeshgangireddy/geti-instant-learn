@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { MatcherModel, ModelType, Sam3Model, SupportedModelMetadataType, YoloeModel } from '@/api'; main
+import type { MatcherModel, ModelType, Sam3Model, SupportedModelMetadataType } from '@/api';
 
 /** Returns a mocked PerDINO model by default. Pass overrides to customize. */
 export const getMockedModel = (model?: Partial<ModelType>): ModelType => {
@@ -22,24 +22,6 @@ export const getMockedModel = (model?: Partial<ModelType>): ModelType => {
         },
         active: true,
         name: 'PerDINO',
-        ...model,
-    };
-};
-
-export const getMockedYoloeModel = (model?: Partial<YoloeModel>): YoloeModel => {
-    return {
-        id: 'yoloe-id',
-        config: {
-            model_type: 'yoloe',
-            model_name: 'yoloe-v8s-seg',
-            confidence_threshold: 0.25,
-            iou_threshold: 0.7,
-            imgsz: 640,
-            use_nms: true,
-            precision: 'fp16',
-        },
-        active: false,
-        name: 'YOLOE',
         ...model,
     };
 };
@@ -135,17 +117,5 @@ export const getMockedSupportedModels = (): SupportedModelMetadataType[] => [
             precision: 'fp32',
         },
         supported_prompt_types: ['text', 'visual_rectangle'],
-    },
-    {
-        default_config: {
-            model_type: 'yoloe',
-            model_name: 'yoloe-v8s-seg',
-            confidence_threshold: 0.25,
-            iou_threshold: 0.7,
-            imgsz: 640,
-            use_nms: true,
-            precision: 'fp16',
-        },
-        supported_prompt_types: ['visual_polygon', 'visual_rectangle'],
     },
 ];

@@ -15,7 +15,7 @@ from .matcher import Matcher
 from .per_dino import PerDino
 from .sam3 import SAM3, SAM3OpenVINO, SAM3OVVariant, Sam3PromptMode
 from .soft_matcher import SoftMatcher
-from .yoloe import YOLOE, YOLOEOpenVINO
+from .yoloe import YOLOE, YOLOEOpenVINO, YoloeOVVariant, YoloePromptMode
 
 __all__ = [
     "SAM3",
@@ -31,4 +31,6 @@ __all__ = [
     "SoftMatcher",
     "YOLOE",
     "YOLOEOpenVINO",
+    "YoloeOVVariant",
+    "YoloePromptMode",
 ]

@@ -106,20 +106,7 @@ def get_supported_models(
                                     "precision": "bf16",
                                 },
                             },
-                            {
-                                "id": "880e8400-e29b-41d4-a716-446655440003",
-                                "name": "YOLOE Model",
-                                "active": False,
-                                "config": {
-                                    "model_type": "yoloe",
-                                    "model_name": "yoloe-v8s-seg",
-                                    "confidence_threshold": 0.25,
-                                    "iou_threshold": 0.7,
-                                    "imgsz": 640,
-                                    "use_nms": True,
-                                    "precision": "fp16",
-                                },
-                            },
+
                         ]
                     },
                 }
@@ -337,23 +324,7 @@ def get_model(project_id: UUID, model_id: UUID, model_service: ModelServiceDep) 
                                 },
                             },
                         },
-                        "yoloe": {
-                            "summary": "YOLOE model",
-                            "value": {
-                                "id": "770e8400-e29b-41d4-a716-446655440002",
-                                "name": "New YOLOE Model",
-                                "active": False,
-                                "config": {
-                                    "model_type": "yoloe",
-                                    "model_name": "yoloe-v8s-seg",
-                                    "confidence_threshold": 0.25,
-                                    "iou_threshold": 0.7,
-                                    "imgsz": 640,
-                                    "use_nms": True,
-                                    "precision": "fp16",
-                                },
-                            },
-                        },
+
                     }
                 }
             },
