@@ -25,15 +25,16 @@ from domain.errors import (
 )
 from domain.repositories.processor import ProcessorRepository
 from domain.repositories.project import ProjectRepository
-from domain.repositories.supported_model import SupportedModelRepository
+from domain.repositories.supported_model import DEFAULT_ACTIVE_MODEL, SupportedModelRepository
 from domain.services.base import BaseService
+from domain.services.schemas.mappers.processor import processor_schema_to_db
 from domain.services.schemas.mappers.project import (
     project_db_to_schema,
     project_schema_to_db,
     projects_db_to_list_items,
 )
 from domain.services.schemas.pipeline import PipelineConfig
-from domain.services.schemas.processor import ModelConfig, ModelType
+from domain.services.schemas.processor import ModelConfig, ProcessorCreateSchema
 from domain.services.schemas.project import (
     ProjectCreateSchema,
     ProjectSchema,
@@ -78,6 +79,7 @@ class ProjectService(BaseService):
         """
         Persist and activate a new project.
         Database constraints enforce name and ID uniqueness.
+        Also seeds all supported model processor records for the project.
         """
         logger.debug(
             "Project create requested: name=%s id=%s",
@@ -90,6 +92,7 @@ class ProjectService(BaseService):
             with self.db_transaction():
                 self._activate_project(project)
                 self.project_repository.add(project)
+                self._seed_processors(project)
         except IntegrityError as exc:
             logger.error("Project creation failed due to constraint violation: %s", exc)
             self._handle_project_integrity_error(exc, project.id, create_data.name)
@@ -400,39 +403,58 @@ class ProjectService(BaseService):
             raise ValueError(f"Device {device_str!r} is not available on this system.")
 
     def _ensure_compatible_active_model(self, project_id: UUID, prompt_mode: PromptType) -> None:
-        """Switch active model to a compatible one if needed after a prompt_mode change.
+        """Switch the active model to the most recently used compatible one after a prompt_mode change.
 
-        If the currently active model doesn't support the new prompt_mode, activate the
-        first compatible model (most recently updated) in the project. If no compatible
-        model exists, deactivate the current one so the pipeline runs with no processor.
+        Deactivates the current active model, then activates the most recently updated processor
+        that belongs to the new prompt_mode (by updated_at DESC).
         """
         active_model = self.processor_repository.get_active_in_project(project_id)
-        if active_model is None:
-            return
+        if active_model is not None:
+            active_model.active = False
+            self.processor_repository.update(active_model)
+            logger.info(
+                "Deactivated model %s for prompt_mode switch to %s",
+                active_model.id,
+                prompt_mode,
+            )
 
-        model_type = ModelType(active_model.config.get("model_type", ""))
-        if SupportedModelRepository.model_type_supports_prompt_mode(model_type, prompt_mode):
-            return
-
-        logger.info(
-            "Active model %s (%s) incompatible with prompt_mode=%s, switching",
-            active_model.id,
-            model_type,
-            prompt_mode,
+        next_model = self.processor_repository.get_most_recent_by_project_and_mode(
+            project_id=project_id, prompt_mode=prompt_mode.value
         )
-        active_model.active = False
-        self.processor_repository.update(active_model)
+        if next_model is not None:
+            next_model.active = True
+            self.processor_repository.update(next_model)
+            logger.info(
+                "Auto-activated model %s (%s) for prompt_mode=%s",
+                next_model.id,
+                next_model.config.get("model_type"),
+                prompt_mode,
+            )
+        else:
+            logger.warning("No processor found for prompt_mode=%s in project %s", prompt_mode, project_id)
 
-        all_models = self.processor_repository.list_all_by_project(project_id)
-        for model in all_models:
-            mt = ModelType(model.config.get("model_type", ""))
-            if SupportedModelRepository.model_type_supports_prompt_mode(mt, prompt_mode):
-                model.active = True
-                self.processor_repository.update(model)
-                logger.info("Auto-activated compatible model %s (%s) for prompt_mode=%s", model.id, mt, prompt_mode)
-                return
+    def _seed_processors(self, project: ProjectDB) -> None:
+        """Create one ProcessorDB row per (model_type, prompt_mode) pair for the project.
 
-        logger.warning("No compatible model found for prompt_mode=%s in project %s", prompt_mode, project_id)
+        The DEFAULT_ACTIVE_MODEL pair is set active=True; all others are inactive.
+        Called inside an open transaction from create_project.
+        """
+        default_model_type, default_prompt_mode = DEFAULT_ACTIVE_MODEL
+        processors = []
+        for model_type, prompt_mode in SupportedModelRepository.get_all_model_mode_pairs():
+            metadata = SupportedModelRepository.get_by_model_type(model_type)
+            if metadata is None:
+                continue
+            is_default = model_type == default_model_type and prompt_mode == default_prompt_mode
+            schema = ProcessorCreateSchema(
+                config=metadata.default_config,
+                active=is_default,
+                name=metadata.display_name,
+                prompt_mode=prompt_mode.value,
+            )
+            processors.append(processor_schema_to_db(schema, project_id=project.id))
+        self.processor_repository.add_batch(processors)
+        logger.debug("Seeded %d processors for project_id=%s", len(processors), project.id)
 
     def _handle_project_integrity_error(
         self, exc: IntegrityError, project_id: UUID, project_name: str | None = None

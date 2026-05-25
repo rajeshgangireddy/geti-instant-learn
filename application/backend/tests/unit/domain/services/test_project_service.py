@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 from sqlalchemy.exc import IntegrityError
 
+from domain.db.models import PromptType
 from domain.dispatcher import (
     ComponentConfigChangeEvent,
     ComponentType,
@@ -107,7 +108,7 @@ def service(session_mock, repo_mock, processor_repo_mock, dispatcher_mock):
 
 
 @pytest.mark.parametrize("explicit_id", [None, uuid.uuid4()])
-def test_create_project_success(service, repo_mock, session_mock, explicit_id):
+def test_create_project_success(service, repo_mock, processor_repo_mock, session_mock, explicit_id):
     if explicit_id is None:
         data = ProjectCreateSchema(name="alpha")
     else:
@@ -123,6 +124,10 @@ def test_create_project_success(service, repo_mock, session_mock, explicit_id):
     repo_mock.add.assert_called_once()
     session_mock.commit.assert_called_once()
     session_mock.refresh.assert_called_once()
+    # 5 processor rows seeded via add_batch: Matcher(VISUAL), PerDino(VISUAL), SoftMatcher(VISUAL), SAM3(VISUAL), SAM3(TEXT)
+    processor_repo_mock.add_batch.assert_called_once()
+    batch = processor_repo_mock.add_batch.call_args.args[0]
+    assert len(batch) == 5
 
 
 def test_create_project_duplicate_name_raises_integrity_error(service, repo_mock, session_mock):
@@ -584,6 +589,89 @@ def test_delete_inactive_emits_no_event(service, repo_mock, dispatcher_mock):
     service.delete_project(project_inactive.id)
 
     dispatcher_mock.dispatch.assert_not_called()
+
+
+def test_create_project_seeds_all_processors(service, repo_mock, processor_repo_mock, session_mock):
+    """create_project seeds 5 processor rows: one per (model_type, mode) pair."""
+    data = ProjectCreateSchema(name="seeded")
+    repo_mock.get_active.return_value = None
+
+    service.create_project(data)
+
+    # Matcher(VISUAL), PerDino(VISUAL), SoftMatcher(VISUAL), SAM3(VISUAL), SAM3(TEXT)
+    processor_repo_mock.add_batch.assert_called_once()
+    batch = processor_repo_mock.add_batch.call_args.args[0]
+    assert len(batch) == 5
+    modes = {p.prompt_mode for p in batch}
+    assert modes == {"VISUAL", "TEXT"}
+    names = {p.name for p in batch}
+    assert names == {"Matcher", "PerDINO", "SoftMatcher", "SAM3"}
+
+
+def test_create_project_default_active_model_is_soft_matcher_visual(
+    service, repo_mock, processor_repo_mock, session_mock
+):
+    """SoftMatcher VISUAL is the only active=True processor after project creation."""
+    data = ProjectCreateSchema(name="default_active")
+    repo_mock.get_active.return_value = None
+
+    service.create_project(data)
+
+    batch = processor_repo_mock.add_batch.call_args.args[0]
+    active_processors = [p for p in batch if p.active]
+    assert len(active_processors) == 1
+    assert active_processors[0].name == "SoftMatcher"
+    assert active_processors[0].prompt_mode == "VISUAL"
+
+
+def test_ensure_compatible_active_model_switches_to_most_recently_updated(
+    service, repo_mock, processor_repo_mock, dispatcher_mock
+):
+    """On mode switch, activates the most recently updated processor for the new mode."""
+    pid = uuid.uuid4()
+    active_visual = make_model(pid, active=True)
+    active_visual.config = {"model_type": "matcher"}
+
+    most_recent_text = make_model(pid, active=False)
+    most_recent_text.config = {"model_type": "sam3"}
+
+    processor_repo_mock.get_active_in_project.return_value = active_visual
+    processor_repo_mock.get_most_recent_by_project_and_mode.return_value = most_recent_text
+    processor_repo_mock.update.side_effect = lambda m: m
+
+    service._ensure_compatible_active_model(pid, PromptType.TEXT)
+
+    assert active_visual.active is False
+    assert most_recent_text.active is True
+    processor_repo_mock.get_most_recent_by_project_and_mode.assert_called_once_with(project_id=pid, prompt_mode="TEXT")
+
+
+def test_ensure_compatible_active_model_no_candidates_leaves_no_active(service, repo_mock, processor_repo_mock):
+    """If no processors exist for the new mode, nothing is activated."""
+    pid = uuid.uuid4()
+    active_visual = make_model(pid, active=True)
+
+    processor_repo_mock.get_active_in_project.return_value = active_visual
+    processor_repo_mock.get_most_recent_by_project_and_mode.return_value = None
+    processor_repo_mock.update.side_effect = lambda m: m
+
+    service._ensure_compatible_active_model(pid, PromptType.TEXT)
+
+    assert active_visual.active is False
+
+
+def test_ensure_compatible_active_model_no_current_active(service, repo_mock, processor_repo_mock):
+    """If no active model exists, still activates the best candidate for the new mode."""
+    pid = uuid.uuid4()
+    candidate = make_model(pid, active=False)
+
+    processor_repo_mock.get_active_in_project.return_value = None
+    processor_repo_mock.get_most_recent_by_project_and_mode.return_value = candidate
+    processor_repo_mock.update.side_effect = lambda m: m
+
+    service._ensure_compatible_active_model(pid, PromptType.VISUAL)
+
+    assert candidate.active is True
 
 
 def test_delete_project_with_prompts_and_annotations(service, repo_mock, session_mock):
