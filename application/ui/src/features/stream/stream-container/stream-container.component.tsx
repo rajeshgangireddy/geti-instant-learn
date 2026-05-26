@@ -5,7 +5,7 @@
 
 import { ReactNode } from 'react';
 
-import { Button, Flex, Loading } from '@geti/ui';
+import { ActionButton, dimensionValue, Flex, Loading, Text } from '@geti/ui';
 import { Play } from '@geti/ui/icons';
 
 import { Stream } from '../stream.component';
@@ -44,12 +44,17 @@ export const StreamContainer = () => {
         );
     }
 
-    if (status === 'idle') {
+    if (['idle', 'disconnected', 'failed'].includes(status)) {
         return (
             <Container>
-                <Button onPress={start} UNSAFE_className={styles.playButton} aria-label={'Start stream'}>
-                    <Play width='128px' height='128px' />
-                </Button>
+                <ActionButton onPress={start} UNSAFE_className={styles.playButton} aria-label={'Start stream'}>
+                    <Play
+                        color={'currentColor'}
+                        width={dimensionValue('size-400')}
+                        height={dimensionValue('size-400')}
+                    />
+                    <Text>Start stream</Text>
+                </ActionButton>
             </Container>
         );
     }
