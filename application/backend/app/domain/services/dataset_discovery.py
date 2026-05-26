@@ -115,14 +115,11 @@ class DatasetResolver:
             DatasetNotFoundError: If the dataset id is not found in the cache or no cached datasets exist.
         """
         if dataset_id is not None:
-            try:
-                return self._dataset_paths[dataset_id]
-            except KeyError as exc:
-                logger.warning("Sample dataset id '%s' could not be resolved from startup cache.", dataset_id)
-                raise DatasetNotFoundError(f"Sample dataset id '{dataset_id}' was not found.") from exc
+            if dataset_id not in self._dataset_paths:
+                raise DatasetNotFoundError(f"Dataset '{dataset_id}' was not found in the startup cache.")
+            return self._dataset_paths[dataset_id]
 
         if not self._dataset_paths:
-            logger.warning("No sample datasets available in startup cache.")
-            raise DatasetNotFoundError("No sample datasets available.")
+            raise DatasetNotFoundError("No sample datasets were found in the startup cache.")
 
         return min(self._dataset_paths.values(), key=lambda dataset_path: (dataset_path.name, str(dataset_path)))

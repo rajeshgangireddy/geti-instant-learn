@@ -82,7 +82,8 @@ class Source(PipelineComponent):
 
             except Exception as e:
                 logger.exception(f"Error reading from stream: {e}.")
-                time.sleep(0.1)
+                self._inbound_broadcaster.broadcast(ErrorData(message=str(e), component=ComponentType.SOURCE))
+
         logger.debug(f"Stopping the source {self._reader.__class__.__name__} loop")
         # TODO: To investigate why reader.close() is fixing issue when switching cameras
         self._reader.close()

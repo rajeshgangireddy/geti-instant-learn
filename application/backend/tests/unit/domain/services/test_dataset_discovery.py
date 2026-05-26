@@ -174,6 +174,15 @@ class TestDatasetResolver:
         with pytest.raises(DatasetNotFoundError, match="was not found"):
             resolver.get_dataset_path(dataset_id=unknown_id)
 
+    def test_get_dataset_path_raises_when_no_datasets_available(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr("domain.services.dataset_discovery.settings.supported_extensions", {".jpg", ".png"})
+        monkeypatch.setattr("domain.services.dataset_discovery.generate_image_thumbnail", lambda _path: "thumb")
+        (tmp_path / "README.txt").write_text("no datasets here")
+        resolver = DatasetResolver(tmp_path)
+
+        with pytest.raises(DatasetNotFoundError, match="No sample datasets"):
+            resolver.get_dataset_path(dataset_id=None)
+
     def test_raises_when_datasets_root_does_not_exist(self, tmp_path: Path) -> None:
         missing_dir = tmp_path / "missing"
 
