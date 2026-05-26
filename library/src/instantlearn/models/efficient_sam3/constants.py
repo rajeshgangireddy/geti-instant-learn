@@ -46,6 +46,7 @@ def get_checkpoint_filename(
     backbone_type: str,
     variant: str,
     text_encoder: str = "mobileclip_s1",
+    ft: bool = False,
 ) -> str:
     """Get the HuggingFace checkpoint filename for a given model configuration.
 
@@ -54,15 +55,32 @@ def get_checkpoint_filename(
         variant: Model size variant (e.g. 'b2', 'm1_1', '11m').
         text_encoder: Text encoder type. Only 'mobileclip_s1' supported for
             combined checkpoints.
+        ft: When True, return the fine-tuned checkpoint filename. Only the
+            medium variant of each backbone family has an ft checkpoint:
+            efficientvit/b1, repvit/m1_1, tinyvit/11m.
 
     Returns:
         Checkpoint filename on HuggingFace.
 
     Raises:
-        ValueError: If the backbone/variant/text_encoder combination is unsupported.
+        ValueError: If the backbone/variant/text_encoder combination is
+            unsupported, or if ``ft=True`` is requested for a variant that
+            does not have a fine-tuned checkpoint.
     """
     if text_encoder == TextEncoderType.MOBILECLIP_S1:
-        # Combined image + text encoder checkpoints
+        key = (backbone_type, variant)
+        if ft:
+            # Fine-tuned checkpoints exist only for the medium variant of each
+            # backbone family and use irregular naming (see _FT_NAME_MAP).
+            if key not in _FT_NAME_MAP:
+                msg = (
+                    f"No fine-tuned checkpoint for backbone={backbone_type}, "
+                    f"variant={variant}. Supported ft variants: "
+                    f"{sorted(_FT_NAME_MAP.keys())}"
+                )
+                raise ValueError(msg)
+            return _FT_NAME_MAP[key]
+        # Combined image + text encoder checkpoints (stage1, distilled)
         name_map: dict[tuple[str, str], str] = {
             (BackboneType.EFFICIENTVIT, "b0"): "efficient_sam3_efficientvit-b0_mobileclip_s1.pth",
             (BackboneType.EFFICIENTVIT, "b1"): "efficient_sam3_efficientvit-b1_mobileclip_s1.pth",
@@ -74,7 +92,6 @@ def get_checkpoint_filename(
             (BackboneType.TINYVIT, "11m"): "efficient_sam3_tinyvit_11m_mobileclip_s1.pth",
             (BackboneType.TINYVIT, "21m"): "efficient_sam3_tinyvit_21m_mobileclip_s1.pth",
         }
-        key = (backbone_type, variant)
         if key not in name_map:
             msg = f"No checkpoint for backbone={backbone_type}, variant={variant}, text={text_encoder}"
             raise ValueError(msg)
@@ -82,6 +99,17 @@ def get_checkpoint_filename(
 
     msg = f"Text encoder type '{text_encoder}' not supported for combined checkpoints"
     raise ValueError(msg)
+
+
+# Fine-tuned ("ft") checkpoints exist only for the medium variant of each
+# backbone family. Upstream filenames use inconsistent naming conventions
+# (dash vs underscore vs dot), so we use an explicit lookup rather than a
+# regex transform. See /memories/repo/efficient_sam3_hf_layout.md.
+_FT_NAME_MAP: dict[tuple[str, str], str] = {
+    (BackboneType.EFFICIENTVIT, "b1"): "efficient_sam3_efficientvit_b1_mobileclip_s1_ft.pth",
+    (BackboneType.REPVIT, "m1_1"): "efficient_sam3_repvit_m1.1_mobileclip_s1_ft.pth",
+    (BackboneType.TINYVIT, "11m"): "efficient_sam3_tinyvit_11m_mobileclip_s1_ft.pth",
+}
 
 
 # MobileCLIP-S1 text encoder configuration

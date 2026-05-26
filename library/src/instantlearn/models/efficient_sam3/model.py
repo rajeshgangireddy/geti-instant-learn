@@ -179,6 +179,7 @@ class EfficientSam3Model(Sam3Model):
         device: str | torch.device | None = None,
         dtype: torch.dtype | None = None,
         torch_dtype: torch.dtype | None = None,
+        ft: bool = False,
         **kwargs: Any,  # noqa: ANN401
     ) -> EfficientSam3Model:
         """Load a pretrained EfficientSAM3 model from HuggingFace Hub or local path.
@@ -191,6 +192,9 @@ class EfficientSam3Model(Sam3Model):
             device: Target device.
             dtype: Data type for model weights (alias for torch_dtype).
             torch_dtype: Data type for model weights.
+            ft: When True, load the fine-tuned checkpoint. Only available for
+                the medium variant of each backbone family: efficientvit/b1,
+                repvit/m1_1, tinyvit/11m. Raises ValueError otherwise.
             **kwargs: Additional arguments passed to EfficientSam3Model.__init__.
 
         Returns:
@@ -207,11 +211,11 @@ class EfficientSam3Model(Sam3Model):
             else:
                 model_path = hf_hub_download(
                     repo_id=pretrained_model_name_or_path,
-                    filename=get_checkpoint_filename(backbone_type, variant),
+                    filename=get_checkpoint_filename(backbone_type, variant, ft=ft),
                     subfolder=HF_SUBFOLDER,
                 )
         else:
-            filename = get_checkpoint_filename(backbone_type, variant)
+            filename = get_checkpoint_filename(backbone_type, variant, ft=ft)
             model_path = hf_hub_download(
                 repo_id=HF_REPO_ID,
                 filename=filename,

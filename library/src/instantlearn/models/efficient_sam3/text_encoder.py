@@ -83,7 +83,6 @@ class MultiHeadSelfAttention(nn.Module):
         self.qkv_proj = nn.Linear(embed_dim, 3 * embed_dim, bias=True)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
         self.head_dim = embed_dim // num_heads
-        self.scaling = self.head_dim**-0.5
         self.num_heads = num_heads
 
     def forward(
@@ -92,11 +91,17 @@ class MultiHeadSelfAttention(nn.Module):
         attn_mask: torch.Tensor | None = None,
         key_padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Apply multi-head self-attention.
+        """Apply multi-head self-attention via fused SDPA.
+
+        Uses ``torch.nn.functional.scaled_dot_product_attention``, which selects
+        the fastest available kernel (FlashAttention / mem-efficient / math) for
+        the current device and dtype. The 1/sqrt(head_dim) scaling is applied
+        internally by SDPA.
 
         Args:
             x: Input [B, S, D].
-            attn_mask: Optional causal mask [B, S, S] or [S, S].
+            attn_mask: Optional additive attention bias broadcastable to
+                [B, H, S, S] (e.g. shape [S, S] or [B, S, S]).
             key_padding_mask: Optional padding mask [B, S] (True=masked).
 
         Returns:
@@ -107,22 +112,21 @@ class MultiHeadSelfAttention(nn.Module):
         qkv = qkv.permute(2, 0, 3, 1, 4)
         query, key, value = qkv[0], qkv[1], qkv[2]
 
-        query *= self.scaling
-        attn = torch.matmul(query, key.transpose(-1, -2))
-
+        # Combine optional attn_mask (additive) and key_padding_mask (True=mask)
+        # into a single additive mask broadcastable to [B, H, S, S].
+        combined_mask: torch.Tensor | None = None
         if attn_mask is not None:
-            if attn_mask.ndim == 3:
-                attn_mask = attn_mask.unsqueeze(1)
-            attn += attn_mask
-
+            combined_mask = attn_mask if attn_mask.ndim == 4 else attn_mask.unsqueeze(1)
+            combined_mask = combined_mask.to(query.dtype)
         if key_padding_mask is not None:
-            attn = attn.masked_fill(
-                key_padding_mask.unsqueeze(1).unsqueeze(2).to(torch.bool),
-                float("-inf"),
-            )
+            kpm = torch.zeros_like(key_padding_mask, dtype=query.dtype)
+            kpm = kpm.masked_fill(key_padding_mask.to(torch.bool), float("-inf"))
+            kpm = kpm.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, S]
+            combined_mask = kpm if combined_mask is None else combined_mask + kpm
 
-        attn = attn.softmax(dim=-1).to(query.dtype)
-        out = torch.matmul(attn, value)
+        out = functional.scaled_dot_product_attention(
+            query, key, value, attn_mask=combined_mask, is_causal=False,
+        )
         out = out.transpose(1, 2).reshape(b, s, -1)
         return self.out_proj(out)
 
