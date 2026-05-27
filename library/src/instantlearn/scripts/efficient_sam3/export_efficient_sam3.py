@@ -82,6 +82,44 @@ _TOKENIZER_REPO = "jetjodh/sam3"
 _STUDENT_CONTEXT_LENGTH = 32
 
 
+# Per-(backbone_type, variant) override of sub-models that must NOT receive INT8
+# PTQ activation quantization. These sub-models are copied from the FP16 IR
+# directory verbatim into the `openvino-int8_ptq_gpu/` layout, so the resulting
+# variant remains a self-contained 5-model bundle.
+#
+# Background: OpenVINO 2025.3's Intel-GPU plugin emits broken OneDNN INT8
+# kernels for the specific op patterns produced by NNCF when quantizing the
+# RepViT-M0-9 vision/geometry/prompt-decoder sub-models on Battlemage
+# (Intel B60). The failure mode is silent: predictions degenerate to empty or
+# near-empty sets, F1 collapses on OOD prompts, and visual-exemplar fit
+# occasionally crashes the worker (`longjmp causes uninitialized stack frame`).
+# Only the text-encoder INT8 sub-graph compiles to a correct GPU kernel for
+# this backbone. See `library/tools/results/repvit_m0_9/INVESTIGATION.md`.
+#
+# Other backbones (repvit_m1_1, repvit_m2_3, efficientvit_*) do not exhibit
+# the bug and are quantized in full as before.
+_PTQ_FP16_SUBMODELS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("repvit", "m0_9"): (
+        _VISION_ENCODER,
+        _GEOMETRY_ENCODER,
+        _GEOMETRY_ENCODER_EXEMPLAR,
+        _PROMPT_DECODER,
+    ),
+}
+
+
+def _ptq_models_for(backbone_type: str, variant: str) -> list[str] | None:
+    """Return the list of sub-models to quantize for ``(backbone_type, variant)``.
+
+    Returns ``None`` to mean "quantize all 5 sub-models" (the default for
+    every backbone except those in :data:`_PTQ_FP16_SUBMODELS`).
+    """
+    fp16_only = _PTQ_FP16_SUBMODELS.get((backbone_type, variant))
+    if not fp16_only:
+        return None
+    return [name for name in MODEL_NAMES if name not in fp16_only]
+
+
 # ONNX export
 
 def export_to_onnx(  # noqa: PLR0915
@@ -752,11 +790,23 @@ def main() -> None:
             )
             if args.calibration_root is None:
                 parser.error("--calibration-root is required for int8_ptq mode")
+            ptq_models = _ptq_models_for(args.backbone_type, args.variant)
+            if ptq_models is not None:
+                skipped = sorted(set(MODEL_NAMES) - set(ptq_models))
+                logger.info(
+                    "Per-backbone PTQ policy for %s/%s: quantizing %s; "
+                    "copying FP16 verbatim for %s "
+                    "(OpenVINO 2025.3 GPU plugin INT8 kernels broken for "
+                    "these sub-models on this backbone — see "
+                    "tools/results/repvit_m0_9/INVESTIGATION.md).",
+                    args.backbone_type, args.variant, ptq_models, skipped,
+                )
             try:
                 result_dirs["int8_ptq"] = quantize_efficient_sam3_ptq(
                     source_dir=args.source_dir,
                     output_dir=args.output_dir,
                     calibration_dir=args.calibration_root,
+                    models=ptq_models,
                     target_device=args.ptq_target_device,
                     num_calibration=args.ptq_num_calibration,
                     variant_name="int8_ptq_gpu",
