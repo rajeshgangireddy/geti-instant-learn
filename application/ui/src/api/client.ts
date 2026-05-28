@@ -6,23 +6,8 @@
 import createFetchClient from 'openapi-fetch';
 import createClient from 'openapi-react-query';
 
+import { getBaseUrl } from './get-base-url';
 import type { paths } from './openapi-spec';
-
-/* eslint-disable no-underscore-dangle */
-export const isTauriContext = (): boolean => typeof window.__TAURI__?.core?.invoke === 'function';
-
-const getBaseUrl = async (): Promise<string> => {
-    if (isTauriContext()) {
-        const tauriApiUrl = await window.__TAURI__!.core!.invoke<string>('get_public_api_url');
-
-        console.info('Backend public API URL:', tauriApiUrl);
-
-        return tauriApiUrl;
-    }
-
-    return import.meta.env.PUBLIC_API_URL || '';
-};
-/* eslint-enable no-underscore-dangle */
 
 export const baseUrl = await getBaseUrl();
 
