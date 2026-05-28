@@ -16,8 +16,8 @@ Current problem examples:
 
 1. Base `Model` contract imports zero torch.
 2. OV models work in environments where torch is not installed.
-3. Torch models retain full tensor ergonomics for training and metrics.
-4. App layer calls `model.predict(batch)` directly — no handler indirection.
+3. Application backend calls `model.predict(batch)` directly — no model specific handler in application backend. Application should be able to have same API for models with different backend. 
+4. Application backend should not have to do any numpy/torch related operations (like resizing). 
 
 
 ---
@@ -107,6 +107,7 @@ class SAM3OpenVINO(Model):
         ...
 
     @classmethod
+    # most won't be needed as we will not be loading from hugging face - but can be useful for fuuture models which do not have license issues
     def from_pretrained(cls, repo_id: str, **kwargs) -> "SAM3OpenVINO": ...
 
     @classmethod
@@ -133,6 +134,7 @@ preds = model.predict(images)
 model = SAM3OpenVINO.from_pretrained("intel/sam3-ov-int8")
 
 # Torch → OV
+# Backend can just call to_openvino() if needed
 ov_model = SAM3().to_openvino()
 ```
 
@@ -164,7 +166,7 @@ Frozen dataclass — thread-safe, cacheable, forward-compatible.
 ---
 
 ## Processors
-
+Introduce preprocessor that is similar to postprocessor. This should help in removing all the resizing and other such operations from the backend side. 
 Pre- and post-processors drop `nn.Module` and become plain ABCs over numpy:
 
 ```python
