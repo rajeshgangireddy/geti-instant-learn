@@ -27,17 +27,25 @@ Current problem examples:
 ### Class hierarchy
 
 ```
-                     Model(ABC)          ← torch-free
+                     Model(ABC)              ← torch-free
                     /          \
-          TorchModel            OVModels
-        (Model, nn.Module)      (SAM3OpenVINO, MatcherOV, ...)
-           /     \
-        SAM3    Matcher ...
+          TorchModel            OpenVINOModel
+        (Model, nn.Module)      (Model)
+           /     \                /       \
+        SAM3    Matcher    SAM3OV   MatcherOV
 ```
 
 Sibling models: each backend gets its own class. No runtime branching on backend inside a single class.
 
+`TorchModel` and `OpenVINOModel` are intermediate bases that hold backend-specific boilerplate. Concrete models (SAM3, Matcher, etc.) inherit from one of these.
+
 ### `Model` — base contract
+
+**Currently:** `Model(nn.Module)` in `library/src/instantlearn/models/base.py`. Accepts an optional `PostProcessor`, defines `fit()`, `predict()` (returning torch tensors), and `export()`.
+
+**Problem:** Inheriting `nn.Module` means every model — including pure OV ones — needs torch installed. The predict signature returns torch tensors, making the output unusable without torch.
+
+**Proposed:**
 
 ```python
 # library/src/instantlearn/models/base.py
@@ -61,7 +69,15 @@ class Model(ABC):
         """Run inference. Inputs/outputs are numpy."""
 ```
 
+Pure ABC — no torch import at module level. `export()` moves down to `TorchModel` since it's a torch-specific concern.
+
 ### `TorchModel` — torch-aware intermediate
+
+**Currently:** All torch models inherit `Model(nn.Module)` directly. There's no intermediate class — each model independently implements predict() returning `list[dict[str, torch.Tensor]]`.
+
+**Problem:** No shared place to put torch-specific concerns (export, device movement, `inference_mode` context). Each model re-implements these patterns.
+
+**Proposed:**
 
 ```python
 # library/src/instantlearn/models/torch_base.py
@@ -72,16 +88,10 @@ class TorchModel(Model, nn.Module):
     def backend(self) -> Backend:
         return Backend.TORCH
 
-    @final
-    def predict(self, batch: Sequence[Sample]) -> list[Prediction]:
-        tensors = self._to_tensors(batch)
-        with torch.inference_mode():
-            outputs = self.predict_tensors(tensors)
-        return self._to_predictions(outputs)
-
     @abstractmethod
-    def predict_tensors(self, batch: torch.Tensor) -> list[dict[str, torch.Tensor]]:
-        """Torch-native path — use for training loops, custom metrics."""
+    def predict(self, batch: Sequence[Sample]) -> list[Prediction]:
+        """Subclasses implement this directly with torch internals,
+        but must return Prediction (numpy-based)."""
 
     @abstractmethod
     def export(self, path: Path) -> Path:
@@ -92,31 +102,57 @@ class TorchModel(Model, nn.Module):
         ...
 ```
 
-`predict()` is `@final` — subclasses implement `predict_tensors()` only. The base handles tensor↔numpy conversion.
+Subclasses implement `predict()` directly — no indirection through a separate method. The conversion from internal torch tensors to the numpy-based `Prediction` output is the subclass's responsibility (just a `.cpu().numpy()` at the return boundary).
 
-### OpenVINO siblings
+### `OpenVINOModel` — OV-aware intermediate
+
+**Currently:** No OV base class exists. `SAM3OpenVINO` inherits `Model(nn.Module)` directly, importing torch just to satisfy the base class.
+
+**Problem:** Each OV model independently sets up `ov.Core()`, compiles, creates infer requests. No shared place for OV-specific patterns (device selection, model loading, IR compilation).
+
+**Proposed:**
 
 ```python
-# library/src/instantlearn/models/sam3/sam3_openvino.py
+# library/src/instantlearn/models/openvino_base.py
 
-class SAM3OpenVINO(Model):
+class OpenVINOModel(Model):
+    """Base for all OpenVINO-backed models. No torch dependency."""
 
     def __init__(self, model_path: Path, device: str = "AUTO") -> None:
         self._core = ov.Core()
         self._compiled = self._core.compile_model(model_path, device)
-        ...
-
-    @classmethod
-    # most won't be needed as we will not be loading from hugging face - but can be useful for fuuture models which do not have license issues
-    def from_pretrained(cls, repo_id: str, **kwargs) -> "SAM3OpenVINO": ...
-
-    @classmethod
-    def card(cls) -> ModelCard:
-        return SAM3.card()  # delegates to torch sibling
+        self._device = device
 
     @property
     def backend(self) -> Backend:
         return Backend.OPENVINO
+
+    @classmethod
+    def from_pretrained(cls, repo_id: str, **kwargs) -> "OpenVINOModel":
+        """Load from HF repo or local path. Subclasses override for custom loading."""
+        ...
+```
+
+Concrete OV models inherit from this:
+
+```python
+# library/src/instantlearn/models/sam3/sam3_openvino.py
+
+class SAM3OpenVINO(OpenVINOModel):
+
+    def __init__(self, model_path: Path, device: str = "AUTO") -> None:
+        super().__init__(model_path, device)
+        self._request = self._compiled.create_infer_request()
+        ...
+
+    @classmethod
+    def from_pretrained(cls, repo_id: str, **kwargs) -> "SAM3OpenVINO":
+        # most models won't load from HF due to license, but useful for future models
+        ...
+
+    @classmethod
+    def card(cls) -> ModelCard:
+        return SAM3.card()  # delegates to torch sibling
 
     def fit(self, prompts: Sequence[Prompt]) -> None: ...
     def predict(self, batch: Sequence[Sample]) -> list[Prediction]: ...
@@ -138,7 +174,6 @@ model = SAM3OpenVINO.from_pretrained("intel/sam3-ov-int8")
 ov_model = SAM3().to_openvino()
 ```
 
-No `from_torch()` — use `to_openvino()` on the torch instance instead.
 
 ---
 
@@ -206,7 +241,7 @@ def create_model(config: ModelConfig, backend: Backend) -> Model:
     return cls(**config.kwargs)
 ```
 
-Inference becomes:
+Inference becomes standard irrespective of the model backend. 
 
 ```python
 predictions = model.predict(batch)
@@ -215,28 +250,7 @@ predictions = model.predict(batch)
 ---
 
 ## Migration plan
-
-One model per PR, mechanical:
-
-1. Land base types (`Model`, `TorchModel`, `Prediction`, processor ABCs). Keep old `Model` as deprecated alias for one release.
-2. Migrate each torch model: inherit `TorchModel`, rename `predict` → `predict_tensors`, add `card()`.
-3. Migrate OV models: drop `nn.Module`, return `Prediction` from `predict()`.
-4. Rewrite postprocessors to numpy ABCs.
-5. Delete handler classes in the backend app; update factory.
-6. Drop deprecated alias.
-
-**Acceptance criterion:** `pip install instantlearn[openvino]` (no torch extra) works end-to-end with `SAM3OpenVINO`.
-
----
-
-## Deferred
-
-| Topic | Reason | Tracked in |
-|-------|--------|------------|
-| Device pool / management | Separate concern, needs its own discussion | TBD |
-| fit() state machine | No bug motivating it yet | — |
-| Async predict | App-level concern | — |
-
----
+Not sure of this one. We can discuss this. 
+One model per PR might be too slow , so we can YOLO everything :) 
 
 
