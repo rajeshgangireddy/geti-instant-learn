@@ -143,6 +143,8 @@ No `from_torch()` — use `to_openvino()` on the torch instance instead.
 ---
 
 ## `Prediction` dataclass
+Currently we use a dict for results. This is a bit non-standard. I suggest a new Prediction class that's based on numpy. 
+However, we might need torch tensor output sometimes - maybe another model consumes the output or for calculuating metrics using torchmetrics. For this, we can have a to_tensors() or to_torch() method which lazy imports torch. 
 
 ```python
 @dataclass(frozen=True)
