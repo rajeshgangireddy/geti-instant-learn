@@ -205,6 +205,7 @@ class SAM3OpenVINO(Model):
         repo_id: str = SAM3_OV_REPO,
         canvas_config: CanvasConfig | None = None,
         cache_dir: str | Path | None = None,
+        compile_properties: dict | None = None,
     ) -> None:
         """Initialise SAM3 OpenVINO model.
 
@@ -235,6 +236,10 @@ class SAM3OpenVINO(Model):
                 kernels here so subsequent loads of the same model are ~7x
                 faster. ``None`` (default) uses ``model_dir / ".ov_cache"``.
                 Pass an empty string ``""`` to disable caching.
+            compile_properties: Optional dict of extra OpenVINO compile
+                properties merged into (and overriding) the defaults.
+                Use for per-session experiments, e.g.
+                ``{"NUM_STREAMS": "2"}``.
         """
         super().__init__()
 
@@ -267,7 +272,22 @@ class SAM3OpenVINO(Model):
         # From openvino doc  : Models may load slower and consume more memory when 
         # using ov::hint::PerformanceMode::THROUGHPUT compared 
         # to ov::hint::PerformanceMode::LATENCY.
-        _compile_props = {"PERFORMANCE_HINT": "LATENCY"} if self.ov_device != "CPU" else {}
+        # NUM_STREAMS=1 ensures no intra-model parallelism overhead on GPU.
+        # INFERENCE_PRECISION_HINT=f16 is the Arc/Xe2 default; stated explicitly
+        # so the setting is visible and can be overridden via compile_properties.
+        # Note: i8/u8 precision hint and DYNAMIC_QUANTIZATION_GROUP_SIZE are not
+        # supported by the GPU plugin on current OV 2025.x releases for these
+        # models, so the GPU speedup for INT8 variants comes from the export
+        # recipe (group_size=128, scale_estimation=True) rather than a runtime
+        # property.
+        if self.ov_device != "CPU":
+            _compile_props: dict = {
+                "PERFORMANCE_HINT": "LATENCY",
+                "NUM_STREAMS": "1",
+                "INFERENCE_PRECISION_HINT": "f16",
+            }
+        else:
+            _compile_props = {}
 
         # Model caching: huge startup speedup on GPU (~7x faster recompile).
         # No latency change. Disabled on CPU (CPU compile is already fast).
@@ -276,6 +296,9 @@ class SAM3OpenVINO(Model):
             _cache_path = Path(cache_dir) if cache_dir else self.model_dir / ".ov_cache"
             _cache_path.mkdir(parents=True, exist_ok=True)
             _compile_props["CACHE_DIR"] = str(_cache_path)
+
+        if compile_properties:
+            _compile_props.update(compile_properties)
 
         # Always required: vision encoder, text encoder, prompt decoder
         vision_path = _get_model_file(self.model_dir, _VISION_ENCODER)

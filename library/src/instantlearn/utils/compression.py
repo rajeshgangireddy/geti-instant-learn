@@ -28,14 +28,19 @@ def compress_model(
     ov_model: ov.Model,
     mode: CompressionMode = CompressionMode.INT8_SYM,
     group_size: int = 128,
+    scale_estimation: bool | None = None,
 ) -> ov.Model:
     """Apply weight compression to an OpenVINO model.
 
     Args:
         ov_model: OpenVINO model to compress.
         mode: Compression mode. One of the :class:`CompressionMode` values.
-        group_size: Group size for INT4 compression. Ignored for INT8/FP16/FP32.
-            Lower group size usually improves accuracy at the sacrifice of inference speed.
+        group_size: Number of weights per channel that share quantization parameters.
+            ``-1`` means per-channel (no grouping). Applied to both INT8 and INT4
+            modes. Grouped INT8 (e.g. 128) reduces dequantization overhead on GPU
+            and improves GPU inference latency.
+        scale_estimation: When ``True``, enables scale estimation to improve
+            compressed-weight accuracy. Recommended for INT8 on GPU.
 
     Returns:
         Compressed OpenVINO model. For FP32 and FP16 the model is returned
@@ -65,9 +70,9 @@ def compress_model(
     logger.info("Compressing model weights to %s ...", mode.value)
     start = time.time()
 
-    kwargs: dict = {"mode": nncf_mode}
-    if mode in {CompressionMode.INT4_SYM, CompressionMode.INT4_ASYM}:
-        kwargs["group_size"] = group_size
+    kwargs: dict = {"mode": nncf_mode, "group_size": group_size}
+    if scale_estimation is not None:
+        kwargs["scale_estimation"] = scale_estimation
 
     ov_model = nncf.compress_weights(ov_model, **kwargs)
 
