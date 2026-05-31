@@ -4,6 +4,7 @@
 """Matcher model, based on the paper 'Segment Anything with One Shot Using All-Purpose Feature Matching'."""
 
 import logging
+from contextlib import contextmanager
 from pathlib import Path
 
 import cv2
@@ -27,6 +28,18 @@ from instantlearn.utils.constants import Backend, CompressionMode, SAMModelName
 from .prompt_generators import BidirectionalPromptGenerator
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _tinyvit_gpu_safe_attention_bias_export_patch(model: nn.Module):
+    """Apply GPU-safe TinyViT export patch around ONNX export, then restore."""
+    from instantlearn.components.sam.tinyvit_patches import patch_tinyvit_for_export, unpatch_tinyvit  # noqa: PLC0415
+
+    patch_tinyvit_for_export(model)
+    try:
+        yield
+    finally:
+        unpatch_tinyvit(model)
 
 
 class EncoderForwardFeaturesWrapper(nn.Module):
@@ -129,10 +142,9 @@ class MatcherInferenceGraph(nn.Module):
             similarities[0],  # [C, feat_size, feat_size]
         )
 
-        # Apply exportable post-processing (if any)
-        if self.export_postprocessor is not None:
-            masks, scores, labels = self.export_postprocessor(masks, scores, labels)
-
+        # Export path returns per-category slot tensors [C, N, H, W] / [C, N].
+        # Standard post-processors operate on flat [N, H, W] / [N] predictions,
+        # so slot selection and any further filtering are deferred to Python.
         return masks, scores, labels
 
 
@@ -373,6 +385,8 @@ class Matcher(Model):
 
         Args:
             masks: Predicted masks, ``[1, N, H, W]`` or ``[N, H, W]``.
+                After Python slot selection, ``[C, H, W]`` is handled as the
+                same ``[N, H, W]`` case.
             frame_h: Original frame height.
             frame_w: Original frame width.
 
@@ -454,27 +468,6 @@ class Matcher(Model):
             msg = "No reference features. Call fit() first."
             raise RuntimeError(msg)
 
-        # SAM-HQ-Tiny is not compatible with OpenVINO export (non-deterministic output).
-        # Automatically fall back to SAM-HQ-base and warn the user.
-        fallback_segmenter = None
-        if Backend(backend) == Backend.OPENVINO and self.sam_predictor.sam_model_name == SAMModelName.SAM_HQ_TINY:
-            logger.warning(
-                "SAM-HQ-Tiny is not supported for OpenVINO export. "
-                "Some of the layers are non-deterministic and so the exported model is not reliable for inference. "
-                "Falling back to SAM-HQ-base for the exported model. "
-                "SAM-HQ-base weights will be downloaded if not already cached.",
-            )
-            fallback_predictor = load_sam_model(
-                SAMModelName.SAM_HQ_BASE,
-                device="cpu",
-                precision="fp32",
-            )
-            fallback_segmenter = SamDecoder(
-                sam_predictor=fallback_predictor,
-                confidence_threshold=self.segmenter.confidence_threshold,
-                use_mask_refinement=self.segmenter.use_mask_refinement,
-            )
-
         export_path = Path(export_dir)
         export_path.mkdir(parents=True, exist_ok=True)
 
@@ -501,8 +494,7 @@ class Matcher(Model):
         self.segmenter.device = self.sam_predictor.device
         ref_features = self.ref_features.to(export_device)
 
-        # Use fallback decoder (SAM-HQ-base) if SAM-HQ-Tiny was requested with OpenVINO
-        export_decoder = fallback_segmenter if fallback_segmenter is not None else self.segmenter
+        export_decoder = self.segmenter
 
         matcher = (
             MatcherInferenceGraph(
@@ -523,20 +515,21 @@ class Matcher(Model):
         target_image = torch.randn(1, 3, input_size, input_size, device=export_device)
         if backend == Backend.ONNX:
             onnx_path = export_path / "matcher.onnx"
-            torch.onnx.export(
-                matcher,
-                args=(target_image,),
-                f=onnx_path,
-                input_names=["target_image"],
-                output_names=["masks", "scores", "labels"],
-                dynamic_axes={
-                    "target_image": {2: "height", 3: "width"},
-                    "masks": {0: "num_masks", 1: "height", 2: "width"},
-                    "scores": {0: "num_masks"},
-                    "labels": {0: "num_masks"},
-                },
-                dynamo=False,
-            )
+            with _tinyvit_gpu_safe_attention_bias_export_patch(matcher):
+                torch.onnx.export(
+                    matcher,
+                    args=(target_image,),
+                    f=onnx_path,
+                    input_names=["target_image"],
+                    output_names=["masks", "scores", "labels"],
+                    dynamic_axes={
+                        "target_image": {2: "height", 3: "width"},
+                        "masks": {0: "num_categories", 1: "num_slots", 2: "height", 3: "width"},
+                        "scores": {0: "num_categories", 1: "num_slots"},
+                        "labels": {0: "num_categories"},
+                    },
+                    dynamo=False,
+                )
             self._fix_onnx_output_names(onnx_path, ["masks", "scores", "labels"])
             return onnx_path
 
@@ -549,29 +542,31 @@ class Matcher(Model):
                 # ONNX → OpenVINO conversion has much better support.
                 onnx_path = export_path / "matcher.onnx"
                 try:
-                    torch.onnx.export(
-                        matcher,
-                        args=(target_image,),
-                        f=onnx_path,
-                        input_names=["target_image"],
-                        output_names=["masks", "scores", "labels"],
-                        # Keep OpenVINO export graph static for stable GPU shape inference.
-                        # Dynamic axes here can lead to infer-time broadcast mismatches.
-                        dynamo=False,
-                    )
+                    with _tinyvit_gpu_safe_attention_bias_export_patch(matcher):
+                        torch.onnx.export(
+                            matcher,
+                            args=(target_image,),
+                            f=onnx_path,
+                            input_names=["target_image"],
+                            output_names=["masks", "scores", "labels"],
+                            # Keep OpenVINO export graph static for stable GPU shape inference.
+                            # Dynamic axes here can lead to infer-time broadcast mismatches.
+                            dynamo=False,
+                        )
                 except RuntimeError as onnx_err:
                     if "2GiB" in str(onnx_err) or "protobuf" in str(onnx_err):
                         # Large models (e.g. SAM-HQ ViT-H ~2.6GB) exceed protobuf limit.
                         # Re-export with string path so ONNX writes external data files.
                         logger.info("Model exceeds ONNX 2GiB limit, re-exporting with external data")
-                        torch.onnx.export(
-                            matcher,
-                            args=(target_image,),
-                            f=str(onnx_path),
-                            input_names=["target_image"],
-                            output_names=["masks", "scores", "labels"],
-                            dynamo=False,
-                        )
+                        with _tinyvit_gpu_safe_attention_bias_export_patch(matcher):
+                            torch.onnx.export(
+                                matcher,
+                                args=(target_image,),
+                                f=str(onnx_path),
+                                input_names=["target_image"],
+                                output_names=["masks", "scores", "labels"],
+                                dynamo=False,
+                            )
                     else:
                         raise
 

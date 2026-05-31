@@ -119,14 +119,15 @@ class TestMatcherExportIntegration:
         masks, scores, labels = outputs
 
         # Validate output shapes
-        assert masks.ndim == 3, f"Expected masks to have 3 dims, got {masks.ndim}"
-        assert scores.ndim == 1, f"Expected scores to have 1 dim, got {scores.ndim}"
+        assert masks.ndim == 4, f"Expected masks to have 4 dims, got {masks.ndim}"
+        assert scores.ndim == 2, f"Expected scores to have 2 dims, got {scores.ndim}"
         assert labels.ndim == 1, f"Expected labels to have 1 dim, got {labels.ndim}"
-        assert masks.shape[0] == scores.shape[0] == labels.shape[0], "Output counts should match"
+        assert masks.shape[0] == scores.shape[0] == labels.shape[0], "Category counts should match"
+        assert masks.shape[1] == scores.shape[1], "Slot counts should match"
 
         # Validate mask spatial dimensions match input
-        assert masks.shape[1] == target_image.shape[1], "Mask height should match input"
-        assert masks.shape[2] == target_image.shape[2], "Mask width should match input"
+        assert masks.shape[2] == target_image.shape[1], "Mask height should match input"
+        assert masks.shape[3] == target_image.shape[2], "Mask width should match input"
 
     @pytest.mark.parametrize("sam_model", [SAMModelName.SAM_HQ_BASE])
     def test_export_openvino_and_inference(
@@ -192,11 +193,12 @@ class TestMatcherExportIntegration:
         masks, scores, labels = outputs.values()
 
         # Validate output shapes
-        assert masks.ndim == 3, f"Expected masks to have 3 dims, got {masks.ndim}"
-        assert scores.ndim == 1, f"Expected scores to have 1 dim, got {scores.ndim}"
+        assert masks.ndim == 4, f"Expected masks to have 4 dims, got {masks.ndim}"
+        assert scores.ndim == 2, f"Expected scores to have 2 dims, got {scores.ndim}"
         assert labels.ndim == 1, f"Expected labels to have 1 dim, got {labels.ndim}"
-        assert masks.shape[0] == scores.shape[0] == labels.shape[0], "Output counts should match"
+        assert masks.shape[0] == scores.shape[0] == labels.shape[0], "Category counts should match"
+        assert masks.shape[1] == scores.shape[1], "Slot counts should match"
 
         # Validate mask spatial dimensions match model input (static shape export)
-        assert masks.shape[1] == expected_shape[2], "Mask height should match model input"
-        assert masks.shape[2] == expected_shape[3], "Mask width should match model input"
+        assert masks.shape[2] == expected_shape[2], "Mask height should match model input"
+        assert masks.shape[3] == expected_shape[3], "Mask width should match model input"
