@@ -14,6 +14,14 @@ from instantlearn.models.sam3.post_processing import PostProcessingConfig
 from instantlearn.models.sam3.sam3 import Sam3PromptMode
 
 from .efficient_sam3 import EfficientSAM3
+from .efficient_sam3_openvino import EfficientSAM3OpenVINO, EfficientSAM3OVVariant
 from .model import EfficientSam3Model
 
-__all__ = ["EfficientSAM3", "EfficientSam3Model", "PostProcessingConfig", "Sam3PromptMode"]
+__all__ = [
+    "EfficientSAM3",
+    "EfficientSAM3OVVariant",
+    "EfficientSAM3OpenVINO",
+    "EfficientSam3Model",
+    "PostProcessingConfig",
+    "Sam3PromptMode",
+]

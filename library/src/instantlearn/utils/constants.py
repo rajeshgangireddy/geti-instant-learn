@@ -20,17 +20,28 @@ class Backend(StrEnum):
 
 
 class CompressionMode(StrEnum):
-    """Weight compression mode for OpenVINO model export.
+    """Compression mode for OpenVINO model export.
 
-    Controls the precision of stored model weights. Activations remain in
-    floating point. Higher compression reduces model size and memory
-    bandwidth but may lower accuracy, especially for small vision models.
+    Controls the precision of stored model weights and, for ``INT8_PTQ``,
+    activations too. Higher compression reduces model size and memory bandwidth
+    but may lower accuracy, especially for small vision models.
+
+    Weight-only modes (``INT8_SYM``, ``INT8_ASYM``, ``INT4_*``):
+        Weights are quantized; activations remain in floating point.
+        Data-free — no calibration dataset required.
+
+    Full PTQ mode (``INT8_PTQ``):
+        Both weights and activations are quantized to INT8 using a calibration
+        dataset. Enables hardware INT8 acceleration (DP4A/DPAS on Intel GPU,
+        VNNI/AMX on CPU). Requires ``--calibration-root`` at export time.
+        Output subdirectory: ``openvino-int8_ptq_gpu``.
     """
 
     FP32 = "fp32"
     FP16 = "fp16"
     INT8_SYM = "int8_sym"
     INT8_ASYM = "int8_asym"
+    INT8_PTQ = "int8_ptq"
     INT4_SYM = "int4_sym"
     INT4_ASYM = "int4_asym"
 

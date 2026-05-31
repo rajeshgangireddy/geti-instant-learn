@@ -43,7 +43,9 @@ def compress_model(
         at save time).
 
     Raises:
-        ValueError: If *mode* is not a supported compression mode.
+        ValueError: If *mode* is not a supported weight-compression mode.
+            ``CompressionMode.INT8_PTQ`` is not supported here — use
+            ``quantize_model()`` for full activation+weight PTQ.
     """
     if mode in {CompressionMode.FP32, CompressionMode.FP16}:
         # FP32 means no compression and FP16 is handled by openvino.save_model.

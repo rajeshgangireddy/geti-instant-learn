@@ -1,0 +1,48 @@
+/home/rgangire/workspace/code/GetiPrompt/geti-instant-learn/library/.xpu/lib/python3.13/site-packages/timm/models/layers/__init__.py:48: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+/home/rgangire/workspace/code/GetiPrompt/geti-instant-learn/library/.xpu/lib/python3.13/site-packages/timm/models/registry.py:4: FutureWarning: Importing from timm.models.registry is deprecated, please import via timm.models
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.models", FutureWarning)
+/home/rgangire/workspace/code/GetiPrompt/geti-instant-learn/library/.xpu/lib/python3.13/site-packages/segment_anything_hq/modeling/tiny_vit_sam.py:662: UserWarning: Overwriting tiny_vit_5m_224 in registry with segment_anything_hq.modeling.tiny_vit_sam.tiny_vit_5m_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/home/rgangire/workspace/code/GetiPrompt/geti-instant-learn/library/.xpu/lib/python3.13/site-packages/segment_anything_hq/modeling/tiny_vit_sam.py:662: UserWarning: Overwriting tiny_vit_11m_224 in registry with segment_anything_hq.modeling.tiny_vit_sam.tiny_vit_11m_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/home/rgangire/workspace/code/GetiPrompt/geti-instant-learn/library/.xpu/lib/python3.13/site-packages/segment_anything_hq/modeling/tiny_vit_sam.py:662: UserWarning: Overwriting tiny_vit_21m_224 in registry with segment_anything_hq.modeling.tiny_vit_sam.tiny_vit_21m_224. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/home/rgangire/workspace/code/GetiPrompt/geti-instant-learn/library/.xpu/lib/python3.13/site-packages/segment_anything_hq/modeling/tiny_vit_sam.py:662: UserWarning: Overwriting tiny_vit_21m_384 in registry with segment_anything_hq.modeling.tiny_vit_sam.tiny_vit_21m_384. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/home/rgangire/workspace/code/GetiPrompt/geti-instant-learn/library/.xpu/lib/python3.13/site-packages/segment_anything_hq/modeling/tiny_vit_sam.py:662: UserWarning: Overwriting tiny_vit_21m_512 in registry with segment_anything_hq.modeling.tiny_vit_sam.tiny_vit_21m_512. This is because the name being registered conflicts with an existing name. Please check if this is not expected.
+  return register_model(fn_wrapper)
+/home/rgangire/workspace/code/GetiPrompt/geti-instant-learn/library/src/instantlearn/models/efficient_sam3/efficient_sam3.py:273: UserWarning: In XPU autocast, but the target dtype is not supported. Disabling autocast.
+XPU Autocast only supports dtypes of torch.bfloat16, torch.float16 currently.
+  return torch.autocast(device_type=device_type, dtype=precision_to_torch_dtype(self.precision))
+/home/rgangire/workspace/code/GetiPrompt/geti-instant-learn/library/.xpu/lib/python3.13/site-packages/torch/_dynamo/variables/functions.py:1946: UserWarning: Dynamo does not know how to trace the builtin `<unknown module>.SimpleNamespace.__new__.` This function is either a Python builtin (e.g. _warnings.warn) or a third-party C/C++ Python extension (perhaps created with pybind).
+If it is a Python builtin, please file an issue on GitHub so the PyTorch team can add support for it and see the next case for a workaround.
+If it is a third-party C/C++ Python extension, please either wrap it into a PyTorch-understood custom operator (see https://pytorch.org/tutorials/advanced/custom_ops_landing_page.html for more details) or, if it is traceable, use `torch.compiler.allow_in_graph`.
+  torch._dynamo.utils.warn_once(explanation + "\n" + "\n".join(hints))
+W0519 13:52:56.928000 60434 torch/_dynamo/variables/tensor.py:1079] [2/0] Graph break from `Tensor.item()`, consider setting:
+W0519 13:52:56.928000 60434 torch/_dynamo/variables/tensor.py:1079] [2/0]     torch._dynamo.config.capture_scalar_outputs = True
+W0519 13:52:56.928000 60434 torch/_dynamo/variables/tensor.py:1079] [2/0] or:
+W0519 13:52:56.928000 60434 torch/_dynamo/variables/tensor.py:1079] [2/0]     env TORCHDYNAMO_CAPTURE_SCALAR_OUTPUTS=1
+W0519 13:52:56.928000 60434 torch/_dynamo/variables/tensor.py:1079] [2/0] to include these operations in the captured graph.
+W0519 13:52:56.928000 60434 torch/_dynamo/variables/tensor.py:1079] [2/0] 
+W0519 13:52:56.928000 60434 torch/_dynamo/variables/tensor.py:1079] [2/0] Graph break: from user code at:
+W0519 13:52:56.928000 60434 torch/_dynamo/variables/tensor.py:1079] [2/0]   File "/home/rgangire/workspace/code/GetiPrompt/geti-instant-learn/library/src/instantlearn/models/sam3/model.py", line 1401, in torch_dynamo_resume_in_forward_at_1292
+W0519 13:52:56.928000 60434 torch/_dynamo/variables/tensor.py:1079] [2/0]     vision_pos_encoding=encoder_outputs["pos_embeds_flattened"],
+W0519 13:52:56.928000 60434 torch/_dynamo/variables/tensor.py:1079] [2/0]   File "/home/rgangire/workspace/code/GetiPrompt/geti-instant-learn/library/src/instantlearn/models/sam3/detr.py", line 803, in forward
+W0519 13:52:56.928000 60434 torch/_dynamo/variables/tensor.py:1079] [2/0]     rpb_matrix = self._get_rpb_matrix(reference_boxes, spatial_shape)
+W0519 13:52:56.928000 60434 torch/_dynamo/variables/tensor.py:1079] [2/0]   File "/home/rgangire/workspace/code/GetiPrompt/geti-instant-learn/library/src/instantlearn/models/sam3/detr.py", line 695, in _get_rpb_matrix
+W0519 13:52:56.928000 60434 torch/_dynamo/variables/tensor.py:1079] [2/0]     height_int = int(height)
+W0519 13:52:56.928000 60434 torch/_dynamo/variables/tensor.py:1079] [2/0] 
+W0519 13:52:56.928000 60434 torch/_dynamo/variables/tensor.py:1079] [2/0] 
+loading annotations into memory...
+Done (t=0.00s)
+creating index...
+index created!
+loading annotations into memory...
+Done (t=0.00s)
+creating index...
+index created!
+loading annotations into memory...
+Done (t=0.00s)
+creating index...
+index created!
