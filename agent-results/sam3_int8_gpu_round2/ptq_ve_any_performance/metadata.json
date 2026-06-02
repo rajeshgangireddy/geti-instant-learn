@@ -1,0 +1,7 @@
+{
+  "target_device": "ANY",
+  "preset": "PERFORMANCE",
+  "ignored_scope": "softmax_ln_gelu",
+  "subset_size": 4,
+  "source_model": "/home/rgangire/.cache/huggingface/hub/models--rajeshgangireddy--SAM3_OpenVINO/snapshots/844e4143273676daa3402f69c866f8a71f65067f/openvino-fp16/vision-encoder.xml"
+}

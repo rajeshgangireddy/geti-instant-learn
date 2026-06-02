@@ -161,3 +161,7 @@ library/datasets/
 
 
 .agents/
+
+# OMEGA agent results: keep reports/scripts/configs, exclude large model IR binaries
+agent-results/**/*.bin
+agent-results/**/*.xml

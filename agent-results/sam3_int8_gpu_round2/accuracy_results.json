@@ -1,0 +1,30 @@
+{
+  "ptq_ve_any_performance_softmax_ln_gelu": {
+    "mean_cosine_sim": 0.97147801689438,
+    "min_cosine_sim": 0.9506741170392041,
+    "std_cosine_sim": 0.004968898692643654,
+    "num_images": 50,
+    "pass": false
+  },
+  "ptq_ve_gpu_performance_softmax_ln_gelu": {
+    "mean_cosine_sim": 0.97147801689438,
+    "min_cosine_sim": 0.9506741170392041,
+    "std_cosine_sim": 0.004968898692643654,
+    "num_images": 50,
+    "pass": false
+  },
+  "int4_ve": {
+    "mean_cosine_sim": 0.9775,
+    "min_cosine_sim": 0.9589,
+    "std_cosine_sim": 0.0048,
+    "num_images": 50,
+    "pass": false
+  },
+  "int4_sym_g32": {
+    "mean_cosine_sim": 0.9825,
+    "min_cosine_sim": 0.9717,
+    "std_cosine_sim": 0.0035,
+    "num_images": 50,
+    "pass": false
+  }
+}

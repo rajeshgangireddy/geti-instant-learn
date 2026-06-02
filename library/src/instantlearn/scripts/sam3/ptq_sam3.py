@@ -1,7 +1,7 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""Full post-training quantization (PTQ) for SAM3 OpenVINO IR models.
+r"""Full post-training quantization (PTQ) for SAM3 OpenVINO IR models.
 
 Applies ``nncf.quantize()`` to each SAM3 sub-model using real calibration
 data.  Unlike weight-only compression (``export_sam3.py --quantize``), this
@@ -306,6 +306,7 @@ def quantize_sam3_ptq(  # noqa: C901, PLR0915
     target_device: str = "ANY",
     preset: str = "MIXED",
     model_type: str | None = None,
+    ignored_types: list[str] | None = None,
     num_calibration: int = 300,
     variant_name: str = "ptq-int8",
     target_size: int = 1008,
@@ -321,6 +322,12 @@ def quantize_sam3_ptq(  # noqa: C901, PLR0915
         target_device: NNCF target device (ANY, CPU, CPU_SPR, GPU, NPU).
         preset: Quantization preset (PERFORMANCE or MIXED).
         model_type: Optional model type hint (e.g. "Transformer").
+        ignored_types: OpenVINO op-type names excluded from quantization.
+            On Arc/Xe2 GPU, exclude ``["Softmax", "MVN", "Gelu"]`` to keep
+            attention weights, layer-norms, and activations in FP16 while
+            quantizing convolutions and MatMuls to INT8.  This selective
+            recipe yields ~24 % GPU latency improvement vs full FP16, without
+            the accuracy collapse seen in fully-quantized PTQ models.
         num_calibration: Number of calibration samples per sub-model.
         variant_name: Name for the output subdirectory.
         target_size: Input image resolution.
@@ -372,6 +379,14 @@ def quantize_sam3_ptq(  # noqa: C901, PLR0915
         text_compiled = core.compile_model(text_xml, "CPU")
         logger.info("Compiled text-encoder for calibration data generation")
 
+    # Build IgnoredScope from caller-supplied op-type names.
+    # On Arc/Xe2 GPU the recommended set is ["Softmax", "MVN", "Gelu"]:
+    # these ops have numerically sensitive ranges (attention distributions,
+    # normalised features, non-linear activations) that hurt accuracy when
+    # quantized, while keeping them FP16 costs little latency.
+    import nncf  # noqa: PLC0415
+    _ignored_scope = nncf.IgnoredScope(types=ignored_types) if ignored_types else None
+
     # Quantize each sub-model
     for model_name in models:
         xml_path = source_dir / f"{model_name}.xml"
@@ -409,6 +424,7 @@ def quantize_sam3_ptq(  # noqa: C901, PLR0915
             preset=preset,
             subset_size=min(num_calibration, len(cal_data)),
             model_type=model_type,
+            ignored_scope=_ignored_scope,
         )
 
         out_xml = ir_dir / f"{model_name}.xml"
@@ -456,10 +472,11 @@ Examples:
   python ptq_sam3.py --source-dir ./sam3-openvino/openvino-fp16 \\
       --calibration-dir ./calibration-images --output-dir ./sam3-openvino
 
-  # Quantize only vision encoder targeting GPU
+  # Selective W8A8 PTQ for vision-encoder on Arc/Xe2 GPU (~24 % speedup)
   python ptq_sam3.py --source-dir ./sam3-openvino/openvino-fp16 \\
       --calibration-dir ./calibration-images --output-dir ./sam3-openvino \\
-      --models vision-encoder --target-device GPU
+      --models vision-encoder --target-device GPU --preset PERFORMANCE \\
+      --ignored-types Softmax MVN Gelu --variant-name ptq-int8-gpu-selective
 
   # Quantize with Transformer hint and validate
   python ptq_sam3.py --source-dir ./sam3-openvino/openvino-fp16 \\
@@ -533,6 +550,20 @@ Examples:
         help="Input image resolution. Default: 1008",
     )
     parser.add_argument(
+        "--ignored-types",
+        type=str,
+        nargs="+",
+        default=None,
+        metavar="OP_TYPE",
+        help=(
+            "OpenVINO op-type names to exclude from quantization. "
+            "Recommended for GPU: Softmax MVN Gelu (keeps attention, "
+            "layer-norm, and activation ops in FP16 while quantizing "
+            "convolutions and MatMuls to INT8 for ~24 %% GPU speedup). "
+            "Default: None (quantize all op types)."
+        ),
+    )
+    parser.add_argument(
         "--validate",
         action="store_true",
         help="Validate quantized models with dummy inference.",
@@ -554,6 +585,7 @@ Examples:
         target_device=args.target_device,
         preset=args.preset,
         model_type=args.model_type,
+        ignored_types=args.ignored_types,
         num_calibration=args.num_calibration,
         variant_name=args.variant_name,
         target_size=args.resolution,

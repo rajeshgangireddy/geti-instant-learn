@@ -1,0 +1,6 @@
+{
+  "mode": "INT4_SYM",
+  "group_size": 64,
+  "scale_estimation": true,
+  "dataset_size": 32
+}

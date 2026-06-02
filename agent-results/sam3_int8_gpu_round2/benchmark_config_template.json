@@ -1,0 +1,7 @@
+{
+    "GPU": {
+        "PERFORMANCE_HINT": "LATENCY",
+        "PERFORMANCE_HINT_NUM_REQUESTS": "1",
+        "PERF_COUNT": "NO"
+    }
+}

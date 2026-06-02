@@ -1,0 +1,12 @@
+variant,recipe,source,average_ms,median_ms,vs_fp16_pct,mean_cosine_sim,accuracy_pass,notes
+fp16_baseline,FP16 baseline,current run,335.61,338.75,0.0,,,benchmark_app GPU latency
+int8_sym_g128_round1,"compress_weights(INT8_SYM, g=128, scale_est=True)",prior round1 artifact,400.0,,19.19,,,from user-provided round1 result; local re-export blocked by NNCF 3.2 INT8 restrictions
+ptq_ve_gpu_performance,Selective W8A8 PTQ vision encoder only; ignore Softmax/MVN/GELU; target_device=GPU,current run,250.6,253.46,-25.329996126456304,0.97147801689438,False,4-image calibration screen
+ptq_ve_any_performance,Selective W8A8 PTQ vision encoder only; ignore Softmax/MVN/GELU; target_device=ANY,current run,248.17,253.62,-26.054050832811903,0.97147801689438,False,fastest fresh INT8 variant; 4-image calibration screen
+ptq_ve_any_high,PTQ winner + GPU_HOST_TASK_PRIORITY=HIGH + GPU_QUEUE_PRIORITY=HIGH,current run,248.97,251.58,-25.815678913024048,,,slightly worse than baseline PTQ winner
+ptq_ve_any_dynamic,PTQ winner + INFERENCE_PRECISION_HINT=dynamic,current run,571.77,574.35,70.36739072137301,,,dynamic precision regressed badly
+ptq_ve_any_dynamic_high,PTQ winner + dynamic + high priorities,current run,570.74,575.06,70.06048687464616,,,dynamic precision regressed badly
+int4_ve,"compress_weights(INT4_SYM, g=64, scale_est=True)",current run,335.49,338.94,-0.0357557879681787,0.9775,False,fallback INT4 export with 32-image scale estimation
+int4_sym_g32,"compress_weights(INT4_SYM, g=32, scale_est=True)",exploratory artifact,325.59,328.47,-2.98560829534282,0.9825,False,exploratory only
+int4_sym_g64,"compress_weights(INT4_SYM, g=64, scale_est=True)",exploratory artifact,327.83,332.86,-2.31816691993684,,,exploratory only
+nightly_wheels,openvino-nightly / 2026.3 install attempt,current run,,,,,,No compatible wheels on available index for Python 3.13
