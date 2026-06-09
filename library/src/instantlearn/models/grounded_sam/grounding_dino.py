@@ -47,7 +47,7 @@ from transformers.file_utils import (
 )
 from transformers.modeling_utils import PreTrainedModel
 from transformers.models.auto import AutoModel
-from transformers.backbone_utils import load_backbone 
+from transformers.backbone_utils import load_backbone
 from transformers.models.grounding_dino.configuration_grounding_dino import GroundingDinoConfig
 from transformers.pytorch_utils import meshgrid
 from transformers.utils import is_accelerate_available, logging
@@ -3093,8 +3093,8 @@ class GroundingDinoForObjectDetection(GroundingDinoPreTrainedModel):
     """Grounding DINO Model with object detection heads on top, for tasks such as COCO detection."""
 
     _tied_weights_keys: ClassVar = {
-        r"bbox_embed.(?![0])\d+": "bbox_embed.0",
-        r"model\.decoder\.bbox_embed.(?![0])\d+": "model.decoder.bbox_embed.0",
+        r"bbox_embed\.(?!0)\d+": "bbox_embed.0",
+        r"model\.decoder\.bbox_embed\.(?!0)\d+": "model.decoder.bbox_embed.0",
     }
 
     def __init__(self, config: GroundingDinoConfig) -> None:
